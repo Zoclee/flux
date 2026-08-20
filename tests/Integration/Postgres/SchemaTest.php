@@ -15,6 +15,7 @@ use RuntimeException;
 
 final class SchemaTest extends TestCase
 {
+    private Connection $connection;
     private PDO $pdo;
 
     #[Before]
@@ -30,7 +31,8 @@ final class SchemaTest extends TestCase
             self::markTestSkipped('Set FLUX_TEST_DATABASE_URL to run PostgreSQL schema integration tests.');
         }
 
-        $this->pdo = Connection::fromDsn($dsn);
+        $this->connection = Connection::fromDsn($dsn);
+        $this->pdo = $this->connection->pdo();
 
         $this->assertSafeTestDatabase();
         $this->resetSchema();
@@ -232,7 +234,7 @@ SQL,
 
     private function applyMigrations(): \Flux\Persistence\Postgres\MigrationResult
     {
-        return (new Migrator($this->pdo, dirname(__DIR__, 3) . '/database/migrations'))->migrate();
+        return (new Migrator($this->connection, dirname(__DIR__, 3) . '/database/migrations'))->migrate();
     }
 
     private function virtualHostId(string $name): int

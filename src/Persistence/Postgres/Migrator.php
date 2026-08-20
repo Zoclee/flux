@@ -7,12 +7,11 @@ namespace Flux\Persistence\Postgres;
 use PDO;
 use RuntimeException;
 use SplFileInfo;
-use Throwable;
 
 final readonly class Migrator
 {
     public function __construct(
-        private PDO $pdo,
+        private Connection $connection,
         private string $migrationDirectory
     ) {
     }
@@ -60,16 +59,42 @@ final readonly class Migrator
 
     private function ensureSchemaMigrationsTable(): void
     {
-        $this->pdo->exec(<<<'SQL'
+        $this->connection->pdo()->exec(<<<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version text PRIMARY KEY,
     applied_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 SQL);
 
-        $this->pdo->exec(
+        $this->connection->pdo()->exec(
             'CREATE INDEX IF NOT EXISTS schema_migrations_applied_at_idx ON schema_migrations (applied_at)'
         );
+    }
+
+    public function pendingMigrationCount(): ?int
+    {
+        if (!$this->hasSchemaMigrationsTable()) {
+            return null;
+        }
+
+        $appliedVersions = $this->appliedVersions();
+        $pending = 0;
+
+        foreach ($this->migrationFiles() as $migrationFile) {
+            if (!isset($appliedVersions[$this->versionFromFile($migrationFile)])) {
+                $pending++;
+            }
+        }
+
+        return $pending;
+    }
+
+    private function hasSchemaMigrationsTable(): bool
+    {
+        $statement = $this->connection->pdo()->prepare('SELECT to_regclass(:table)');
+        $statement->execute(['table' => 'schema_migrations']);
+
+        return $statement->fetchColumn() === 'schema_migrations';
     }
 
     /**
@@ -77,7 +102,7 @@ SQL);
      */
     private function appliedVersions(): array
     {
-        $statement = $this->pdo->query('SELECT version FROM schema_migrations');
+        $statement = $this->connection->pdo()->query('SELECT version FROM schema_migrations');
 
         if ($statement === false) {
             throw new RuntimeException('Could not read applied PostgreSQL migrations.');
@@ -136,19 +161,15 @@ SQL);
         }
 
         try {
-            $this->pdo->beginTransaction();
-            $this->pdo->exec($sql);
+            $this->connection->transaction(function (PDO $pdo) use ($sql, $version): void {
+                $pdo->exec($sql);
 
-            $statement = $this->pdo->prepare(
-                'INSERT INTO schema_migrations (version) VALUES (:version) ON CONFLICT (version) DO NOTHING'
-            );
-            $statement->execute(['version' => $version]);
-
-            $this->pdo->commit();
-        } catch (Throwable $exception) {
-            if ($this->pdo->inTransaction()) {
-                $this->pdo->rollBack();
-            }
+                $statement = $pdo->prepare(
+                    'INSERT INTO schema_migrations (version) VALUES (:version) ON CONFLICT (version) DO NOTHING'
+                );
+                $statement->execute(['version' => $version]);
+            });
+        } catch (\Throwable $exception) {
 
             throw new MigrationFailure($migrationFile->getBasename(), $exception);
         }

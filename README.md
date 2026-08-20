@@ -24,6 +24,7 @@ The repository command entry point is `flux` at the project root:
 php flux
 php flux help
 php flux --version
+php flux db:status
 php flux migrate
 ```
 
@@ -36,6 +37,12 @@ flux <command>
 Future commands will live under `src/Console/Commands/`.
 
 ### Database Migrations
+
+Flux verifies PostgreSQL connectivity and reports migration status without applying migrations with:
+
+```bash
+php flux db:status
+```
 
 Flux applies PostgreSQL migrations with:
 

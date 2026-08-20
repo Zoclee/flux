@@ -5,25 +5,15 @@ declare(strict_types=1);
 namespace Flux\Console\Commands;
 
 use Flux\Persistence\Postgres\Connection;
+use Flux\Persistence\Postgres\ConnectionConfig;
 use Flux\Persistence\Postgres\MigrationFailure;
 use Flux\Persistence\Postgres\Migrator;
 use Throwable;
 
 final readonly class MigrateCommand
 {
-    /**
-     * @param array{
-     *     database: array{
-     *         host?: string,
-     *         port?: int,
-     *         name?: string,
-     *         user?: string,
-     *         password?: string|null
-     *     }
-     * } $config
-     */
     public function __construct(
-        private array $config,
+        private ConnectionConfig $config,
         private string $migrationDirectory
     ) {
     }
@@ -33,21 +23,19 @@ final readonly class MigrateCommand
      */
     public function run(mixed $output): int
     {
-        $database = $this->config['database'];
-
         $this->write($output, "Flux Database Migrations\n\n");
 
         try {
-            $pdo = Connection::fromConfig($database);
+            $connection = Connection::fromConfig($this->config);
 
-            $this->write($output, sprintf("Database: %s\n", (string) ($database['name'] ?? '')));
+            $this->write($output, sprintf("Database: %s\n", $this->config->database));
             $this->write($output, sprintf(
                 "Host:     %s:%d\n\n",
-                (string) ($database['host'] ?? ''),
-                (int) ($database['port'] ?? 0)
+                $this->config->host,
+                $this->config->port
             ));
 
-            $result = (new Migrator($pdo, $this->migrationDirectory))->migrate();
+            $result = (new Migrator($connection, $this->migrationDirectory))->migrate();
         } catch (MigrationFailure $exception) {
             $this->write($output, sprintf("Migration failed: %s\n\n", $exception->migration));
             $this->write($output, sprintf("ERROR: %s\n", $this->safeError($exception->getPrevious())));
@@ -88,13 +76,6 @@ final readonly class MigrateCommand
             return 'Unknown migration error.';
         }
 
-        $password = $this->config['database']['password'] ?? null;
-        $message = $exception->getMessage();
-
-        if (is_string($password) && $password !== '') {
-            $message = str_replace($password, '[redacted]', $message);
-        }
-
-        return $message;
+        return $this->config->redact($exception->getMessage());
     }
 }

@@ -7,40 +7,23 @@ namespace Flux\Persistence\Postgres;
 use PDO;
 use PDOException;
 use RuntimeException;
+use Throwable;
 
-final readonly class Connection
+final class Connection
 {
-    /**
-     * @param array{
-     *     host?: string,
-     *     port?: int,
-     *     name?: string,
-     *     user?: string,
-     *     password?: string|null
-     * } $config
-     */
-    public static function fromConfig(array $config): PDO
-    {
-        if (!extension_loaded('pdo_pgsql')) {
-            throw new RuntimeException('The pdo_pgsql extension is required to connect to PostgreSQL.');
-        }
+    private ?PDO $pdo = null;
 
-        $host = self::requiredString($config, 'host');
-        $port = (int) ($config['port'] ?? 0);
-        $name = self::requiredString($config, 'name');
-        $user = self::requiredString($config, 'user');
-        $password = $config['password'] ?? null;
-
-        if ($port <= 0) {
-            throw new RuntimeException('PostgreSQL configuration value "port" must be a positive integer.');
-        }
-
-        $dsn = sprintf('pgsql:host=%s;port=%d;dbname=%s', $host, $port, $name);
-
-        return self::create($dsn, $user, $password);
+    public function __construct(
+        private readonly ConnectionConfig $config
+    ) {
     }
 
-    public static function fromDsn(string $dsn): PDO
+    public static function fromConfig(ConnectionConfig $config): self
+    {
+        return new self($config);
+    }
+
+    public static function fromDsn(string $dsn): self
     {
         if (!extension_loaded('pdo_pgsql')) {
             throw new RuntimeException('The pdo_pgsql extension is required to connect to PostgreSQL.');
@@ -50,18 +33,29 @@ final readonly class Connection
             throw new RuntimeException('PostgreSQL DSN must not be empty.');
         }
 
-        return self::create($dsn, null, null);
+        return new self(self::configFromDsn($dsn));
     }
 
-    private static function create(string $dsn, ?string $user, ?string $password): PDO
+    public function pdo(): PDO
     {
+        if ($this->pdo !== null) {
+            return $this->pdo;
+        }
+
+        if (!extension_loaded('pdo_pgsql')) {
+            throw new RuntimeException('The pdo_pgsql extension is required to connect to PostgreSQL.');
+        }
+
         try {
-            return new PDO($dsn, $user, $password, [
+            $this->pdo = new PDO($this->config->dsn(), $this->config->user, $this->config->password, [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             ]);
+
+            return $this->pdo;
         } catch (PDOException $exception) {
             throw new RuntimeException(
-                sprintf('Could not connect to PostgreSQL: %s', $exception->getMessage()),
+                sprintf('Could not connect to PostgreSQL: %s', $this->config->redact($exception->getMessage())),
                 0,
                 $exception
             );
@@ -69,16 +63,57 @@ final readonly class Connection
     }
 
     /**
-     * @param array<string, mixed> $config
+     * @template T
+     * @param callable(PDO): T $callback
+     * @return T
      */
-    private static function requiredString(array $config, string $key): string
+    public function transaction(callable $callback): mixed
     {
-        $value = $config[$key] ?? null;
+        $pdo = $this->pdo();
 
-        if (!is_string($value) || $value === '') {
-            throw new RuntimeException(sprintf('PostgreSQL configuration value "%s" must not be empty.', $key));
+        if ($pdo->inTransaction()) {
+            throw new RuntimeException('Nested PostgreSQL transactions are not supported.');
         }
 
-        return $value;
+        try {
+            $pdo->beginTransaction();
+            $result = $callback($pdo);
+            $pdo->commit();
+
+            return $result;
+        } catch (Throwable $exception) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+
+            throw $exception;
+        }
+    }
+
+    public function config(): ConnectionConfig
+    {
+        return $this->config;
+    }
+
+    private static function configFromDsn(string $dsn): ConnectionConfig
+    {
+        $parts = [];
+
+        foreach (explode(';', preg_replace('/^pgsql:/', '', $dsn) ?? '') as $part) {
+            if ($part === '' || !str_contains($part, '=')) {
+                continue;
+            }
+
+            [$key, $value] = explode('=', $part, 2);
+            $parts[$key] = $value;
+        }
+
+        return new ConnectionConfig(
+            (string) ($parts['host'] ?? '127.0.0.1'),
+            (int) ($parts['port'] ?? 5432),
+            (string) ($parts['dbname'] ?? ''),
+            (string) ($parts['user'] ?? ''),
+            isset($parts['password']) ? (string) $parts['password'] : null
+        );
     }
 }

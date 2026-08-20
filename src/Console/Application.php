@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Flux\Console;
 
+use Flux\Console\Commands\DbStatusCommand;
 use Flux\Console\Commands\MigrateCommand;
+use Flux\Persistence\Postgres\ConnectionConfig;
 use Flux\Support\Dotenv;
+use Throwable;
 
 final class Application
 {
@@ -29,6 +32,7 @@ final class Application
         return match ($command) {
             'help', '-h', '--help' => $this->showHelp($output),
             '--version', '-V' => $this->showVersion($output),
+            'db:status' => $this->dbStatus($output),
             'migrate' => $this->migrate($output),
             default => $this->showUnknownCommand($command, $output),
         };
@@ -47,6 +51,7 @@ Usage:
 
 Available commands:
   help        Display this help message
+  db:status   Show PostgreSQL connection and migration status
   migrate     Apply pending PostgreSQL database migrations
   --version   Display the Flux version
 
@@ -89,13 +94,53 @@ HELP);
      */
     private function migrate(mixed $output): int
     {
+        try {
+            [$projectRoot, $config] = $this->projectContext();
+            $databaseConfig = ConnectionConfig::fromArray($config['database']);
+        } catch (Throwable $exception) {
+            $this->write($output, "Flux Database Migrations\n\n");
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        return (new MigrateCommand(
+            $databaseConfig,
+            $projectRoot . '/database/migrations'
+        ))->run($output);
+    }
+
+    /**
+     * @param resource $output
+     */
+    private function dbStatus(mixed $output): int
+    {
+        try {
+            [$projectRoot, $config] = $this->projectContext();
+            $databaseConfig = ConnectionConfig::fromArray($config['database']);
+        } catch (Throwable $exception) {
+            $this->write($output, "Flux Database Status\n\n");
+            $this->write($output, "Status:   disconnected\n\n");
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        return (new DbStatusCommand(
+            $databaseConfig,
+            $projectRoot . '/database/migrations'
+        ))->run($output);
+    }
+
+    /**
+     * @return array{0: string, 1: array{database: array<string, mixed>}}
+     */
+    private function projectContext(): array
+    {
         $projectRoot = $this->projectRoot ?? dirname(__DIR__, 2);
         Dotenv::load($projectRoot . '/.env');
         $config = require $projectRoot . '/config/flux.php';
 
-        return (new MigrateCommand(
-            $config,
-            $projectRoot . '/database/migrations'
-        ))->run($output);
+        return [$projectRoot, $config];
     }
 }
