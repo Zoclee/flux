@@ -1,13 +1,14 @@
 # Flux
 
-Flux is a lightweight unified message broker written from scratch in vanilla PHP with PostgreSQL planned for persistence.
+Flux is a lightweight unified message broker written from scratch in vanilla PHP with PostgreSQL persistence.
 
-Flux is currently pre-MVP. Broker behavior, database schema, migrations, AMQP 0-9-1 compatibility, and other protocol adapters have not been implemented yet.
+Flux is currently pre-MVP. Broker behavior, AMQP 0-9-1 compatibility, and other protocol adapters have not been implemented yet.
 
 ## Requirements
 
 - PHP 8.4 or newer
 - Composer
+- PostgreSQL for integration tests and persistence work
 
 ## Installation
 
@@ -39,15 +40,51 @@ Future commands will live under `src/Console/Commands/`.
 composer test
 ```
 
-Unit tests live in `tests/Unit/`. Integration tests live in `tests/Integration/` and will later use a real PostgreSQL test database.
+Unit tests live in `tests/Unit/`. Integration tests live in `tests/Integration/` and use a real PostgreSQL test database when `FLUX_TEST_DATABASE_URL` is set.
+
+Example:
+
+```bash
+FLUX_TEST_DATABASE_URL="pgsql:host=127.0.0.1;port=5432;dbname=flux_test;user=flux;password=secret" composer test
+```
+
+## PostgreSQL Persistence Model
+
+The initial schema lives in plain SQL migrations under `database/migrations/`. It establishes the Phase 1 persistence foundation only:
+
+Migration filenames use `yyyymmdd_hhmmss_description.sql` so lexical order is execution order. If multiple migrations are created at the same time, increment the timestamp by one second for each subsequent file. Migrations must be idempotent and safe to apply more than once.
+
+```text
+virtual_hosts
+    |
+    +-- destinations
+    |      |
+    |      +-- bindings
+    |      |
+    |      +-- message_routes
+    |               |
+    |               +-- deliveries
+    |
+    +-- subscriptions
+
+messages
+    |
+    +-- message_routes
+```
+
+Flux uses `destinations` instead of making queues the fundamental abstraction so the core schema stays protocol-neutral. A queue is the first supported destination type, but future protocol adapters should not force MQTT topics, Kafka topics, or AMQP exchanges into queue-specific tables.
+
+`messages` store payload bytes and message metadata once. `message_routes` associate one stored payload with one or more destinations, allowing fan-out without duplicating binary payload data. `deliveries` are separate because reservation, acknowledgement, rejection, retries, and attempts have their own lifecycle independent of message storage.
+
+Live consumers, TCP connections, channels, sockets, and runtime statistics are not persisted. Durable consumption relationships are represented by `subscriptions`; active consumers remain runtime concepts for later broker phases.
 
 ## Directory Structure
 
 - `bin/` - executable entry points
 - `config/` - Flux configuration
-- `database/migrations/` - future database migrations
+- `database/migrations/` - PostgreSQL schema migrations
 - `src/Broker/` - protocol-neutral broker core
-- `src/Console/` - CLI application and commands
+- `src/Console/` - CLI application commands
 - `src/Persistence/` - persistence abstractions and implementations
 - `src/Persistence/Postgres/` - future PostgreSQL persistence implementation
 - `src/Protocol/` - protocol adapters
