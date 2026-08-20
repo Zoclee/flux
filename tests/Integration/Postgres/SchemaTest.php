@@ -102,7 +102,7 @@ final class SchemaTest extends TestCase
         ]);
 
         try {
-            (new Migrator($this->pdo, $migrationDirectory))->migrate();
+            (new Migrator($this->connection, $migrationDirectory))->migrate();
             self::fail('Expected failed migration to throw.');
         } catch (MigrationFailure $exception) {
             self::assertSame('20260820_130001_fail_probe.sql', $exception->migration);
@@ -130,7 +130,7 @@ SQL,
         $this->expectException(MigrationFailure::class);
 
         try {
-            (new Migrator($this->pdo, $migrationDirectory))->migrate();
+            (new Migrator($this->connection, $migrationDirectory))->migrate();
         } finally {
             self::assertSame([], $this->pdo->query('SELECT version FROM schema_migrations')->fetchAll(PDO::FETCH_COLUMN));
             self::assertNull($this->toRegclass('rolled_back_probe'));
