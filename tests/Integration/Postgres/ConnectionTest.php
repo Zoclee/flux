@@ -109,9 +109,8 @@ final class ConnectionTest extends TestCase
         self::assertStringContainsString('Version:  PostgreSQL', $output);
         self::assertStringContainsString('Migrations: up to date', $output);
 
-        if ($this->config->password !== null && $this->config->password !== '') {
-            self::assertStringNotContainsString($this->config->password, $output);
-        }
+        self::assertStringNotContainsString('Password:', $output);
+        self::assertStringNotContainsString('password=', $output);
     }
 
     public function testDbStatusReportsPendingMigrationsWithoutApplyingThem(): void

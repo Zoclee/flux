@@ -195,7 +195,7 @@ SQL,
 
         self::assertNotSame($routeAId, $routeBId);
         self::assertSame(2, (int) $this->pdo->query('SELECT count(*) FROM message_routes')->fetchColumn());
-        self::assertSame('000102ff', bin2hex((string) $this->pdo->query('SELECT payload FROM messages')->fetchColumn()));
+        self::assertSame('000102ff', $this->pdo->query("SELECT encode(payload, 'hex') FROM messages")->fetchColumn());
     }
 
     public function testInvalidDeliveryStateFails(): void
