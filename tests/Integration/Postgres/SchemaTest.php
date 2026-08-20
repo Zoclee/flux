@@ -50,7 +50,7 @@ final class SchemaTest extends TestCase
     public function testEveryMigrationIsRecorded(): void
     {
         self::assertSame(
-            8,
+            9,
             (int) $this->pdo->query('SELECT count(*) FROM schema_migrations')->fetchColumn()
         );
     }
@@ -62,7 +62,7 @@ final class SchemaTest extends TestCase
         self::assertSame([], $result->applied);
 
         self::assertSame(
-            8,
+            9,
             (int) $this->pdo->query('SELECT count(*) FROM schema_migrations')->fetchColumn()
         );
         self::assertSame(
@@ -86,6 +86,7 @@ final class SchemaTest extends TestCase
                 '20260820_120005_create_message_routes',
                 '20260820_120006_create_subscriptions',
                 '20260820_120007_create_deliveries',
+                '20260820_120008_enforce_binding_destination_virtual_host',
             ],
             $statement->fetchAll(PDO::FETCH_COLUMN)
         );
@@ -162,6 +163,24 @@ SQL,
         $this->expectConstraintViolation();
 
         $this->insertDestination($this->virtualHostId('/'), 'topic-a', 'topic');
+    }
+
+    public function testBindingDestinationMustBelongToSameVirtualHost(): void
+    {
+        $defaultHostId = $this->virtualHostId('/');
+        $otherHostId = $this->insertVirtualHost('tenant-a');
+        $otherDestinationId = $this->insertDestination($otherHostId, 'orders');
+
+        $this->expectConstraintViolation();
+
+        $statement = $this->pdo->prepare(
+            "INSERT INTO bindings (virtual_host_id, source, destination_id, routing_key)
+             VALUES (:virtual_host_id, 'orders', :destination_id, 'order.created')"
+        );
+        $statement->execute([
+            'virtual_host_id' => $defaultHostId,
+            'destination_id' => $otherDestinationId,
+        ]);
     }
 
     public function testBinaryPayloadCanBeStoredAndOneMessageCanHaveMultipleRoutes(): void
