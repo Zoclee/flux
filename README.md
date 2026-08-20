@@ -24,6 +24,7 @@ The main command entry point is `bin/flux`:
 php bin/flux
 php bin/flux help
 php bin/flux --version
+php bin/flux migrate
 ```
 
 The intended command format is:
@@ -33,6 +34,38 @@ flux <command>
 ```
 
 Future commands will live under `src/Console/Commands/`.
+
+### Database Migrations
+
+Flux applies PostgreSQL migrations with:
+
+```bash
+php bin/flux migrate
+```
+
+Database configuration is read from normal environment variables:
+
+```text
+FLUX_DB_HOST
+FLUX_DB_PORT
+FLUX_DB_NAME
+FLUX_DB_USER
+FLUX_DB_PASSWORD
+```
+
+The current defaults are defined in `config/flux.php`.
+
+For local development, Flux also loads a `.env` file from the project root before reading configuration:
+
+```text
+FLUX_DB_HOST=127.0.0.1
+FLUX_DB_PORT=5432
+FLUX_DB_NAME=flux
+FLUX_DB_USER=flux
+FLUX_DB_PASSWORD=secret
+```
+
+Values already present in the process environment take precedence over `.env`.
 
 ## Tests
 

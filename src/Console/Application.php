@@ -4,9 +4,17 @@ declare(strict_types=1);
 
 namespace Flux\Console;
 
+use Flux\Console\Commands\MigrateCommand;
+use Flux\Support\Dotenv;
+
 final class Application
 {
     public const VERSION = '0.1.0-dev';
+
+    public function __construct(
+        private readonly ?string $projectRoot = null
+    ) {
+    }
 
     /**
      * @param list<string> $argv
@@ -21,6 +29,7 @@ final class Application
         return match ($command) {
             'help', '-h', '--help' => $this->showHelp($output),
             '--version', '-V' => $this->showVersion($output),
+            'migrate' => $this->migrate($output),
             default => $this->showUnknownCommand($command, $output),
         };
     }
@@ -38,6 +47,7 @@ Usage:
 
 Available commands:
   help        Display this help message
+  migrate     Apply pending PostgreSQL database migrations
   --version   Display the Flux version
 
 HELP);
@@ -72,5 +82,20 @@ HELP);
     private function write(mixed $output, string $message): void
     {
         fwrite($output, $message);
+    }
+
+    /**
+     * @param resource $output
+     */
+    private function migrate(mixed $output): int
+    {
+        $projectRoot = $this->projectRoot ?? dirname(__DIR__, 2);
+        Dotenv::load($projectRoot . '/.env');
+        $config = require $projectRoot . '/config/flux.php';
+
+        return (new MigrateCommand(
+            $config,
+            $projectRoot . '/database/migrations'
+        ))->run($output);
     }
 }

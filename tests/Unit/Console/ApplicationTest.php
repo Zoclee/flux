@@ -16,6 +16,7 @@ final class ApplicationTest extends TestCase
         self::assertSame(0, $exitCode);
         self::assertStringContainsString('Flux 0.1.0-dev', $output);
         self::assertStringContainsString('Usage:', $output);
+        self::assertStringContainsString('migrate', $output);
     }
 
     public function testItPrintsTheVersion(): void

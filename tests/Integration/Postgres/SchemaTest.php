@@ -4,10 +4,14 @@ declare(strict_types=1);
 
 namespace Flux\Tests\Integration\Postgres;
 
+use Flux\Persistence\Postgres\Connection;
+use Flux\Persistence\Postgres\MigrationFailure;
+use Flux\Persistence\Postgres\Migrator;
 use PDO;
 use PDOException;
 use PHPUnit\Framework\Attributes\Before;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class SchemaTest extends TestCase
 {
@@ -26,10 +30,9 @@ final class SchemaTest extends TestCase
             self::markTestSkipped('Set FLUX_TEST_DATABASE_URL to run PostgreSQL schema integration tests.');
         }
 
-        $this->pdo = new PDO($dsn, null, null, [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        ]);
+        $this->pdo = Connection::fromDsn($dsn);
 
+        $this->assertSafeTestDatabase();
         $this->resetSchema();
         $this->applyMigrations();
     }
@@ -52,7 +55,9 @@ final class SchemaTest extends TestCase
 
     public function testMigrationsAreIdempotent(): void
     {
-        $this->applyMigrations();
+        $result = $this->applyMigrations();
+
+        self::assertSame([], $result->applied);
 
         self::assertSame(
             8,
@@ -62,6 +67,72 @@ final class SchemaTest extends TestCase
             1,
             (int) $this->pdo->query("SELECT count(*) FROM virtual_hosts WHERE name = '/'")->fetchColumn()
         );
+    }
+
+    public function testMigrationOrderMatchesLexicalFilenameOrder(): void
+    {
+        $statement = $this->pdo->query('SELECT version FROM schema_migrations ORDER BY applied_at, version');
+        self::assertNotFalse($statement);
+
+        self::assertSame(
+            [
+                '20260820_120000_create_schema_migrations',
+                '20260820_120001_create_virtual_hosts',
+                '20260820_120002_create_destinations',
+                '20260820_120003_create_bindings',
+                '20260820_120004_create_messages',
+                '20260820_120005_create_message_routes',
+                '20260820_120006_create_subscriptions',
+                '20260820_120007_create_deliveries',
+            ],
+            $statement->fetchAll(PDO::FETCH_COLUMN)
+        );
+    }
+
+    public function testFailedMigrationIsNotRecordedAndStopsSubsequentMigrations(): void
+    {
+        $this->resetSchema();
+
+        $migrationDirectory = $this->createTemporaryMigrationDirectory([
+            '20260820_130000_create_probe.sql' => 'CREATE TABLE probe (id integer PRIMARY KEY);',
+            '20260820_130001_fail_probe.sql' => 'INSERT INTO missing_table (id) VALUES (1);',
+            '20260820_130002_after_failure.sql' => 'CREATE TABLE after_failure (id integer PRIMARY KEY);',
+        ]);
+
+        try {
+            (new Migrator($this->pdo, $migrationDirectory))->migrate();
+            self::fail('Expected failed migration to throw.');
+        } catch (MigrationFailure $exception) {
+            self::assertSame('20260820_130001_fail_probe.sql', $exception->migration);
+        }
+
+        self::assertSame(
+            ['20260820_130000_create_probe'],
+            $this->pdo->query('SELECT version FROM schema_migrations ORDER BY version')->fetchAll(PDO::FETCH_COLUMN)
+        );
+        self::assertSame('probe', $this->toRegclass('probe'));
+        self::assertNull($this->toRegclass('after_failure'));
+    }
+
+    public function testFailedTransactionalMigrationIsRolledBack(): void
+    {
+        $this->resetSchema();
+
+        $migrationDirectory = $this->createTemporaryMigrationDirectory([
+            '20260820_140000_create_then_fail.sql' => <<<'SQL'
+CREATE TABLE rolled_back_probe (id integer PRIMARY KEY);
+INSERT INTO missing_table (id) VALUES (1);
+SQL,
+        ]);
+
+        $this->expectException(MigrationFailure::class);
+
+        try {
+            (new Migrator($this->pdo, $migrationDirectory))->migrate();
+        } finally {
+            self::assertSame([], $this->pdo->query('SELECT version FROM schema_migrations')->fetchAll(PDO::FETCH_COLUMN));
+            self::assertNull($this->toRegclass('rolled_back_probe'));
+        }
     }
 
     public function testVirtualHostNamesAreUnique(): void
@@ -159,15 +230,9 @@ final class SchemaTest extends TestCase
         $this->pdo->exec('CREATE SCHEMA public');
     }
 
-    private function applyMigrations(): void
+    private function applyMigrations(): \Flux\Persistence\Postgres\MigrationResult
     {
-        $migrationFiles = glob(dirname(__DIR__, 3) . '/database/migrations/*.sql');
-        self::assertNotFalse($migrationFiles);
-        sort($migrationFiles);
-
-        foreach ($migrationFiles as $migrationFile) {
-            $this->pdo->exec((string) file_get_contents($migrationFile));
-        }
+        return (new Migrator($this->pdo, dirname(__DIR__, 3) . '/database/migrations'))->migrate();
     }
 
     private function virtualHostId(string $name): int
@@ -246,5 +311,44 @@ final class SchemaTest extends TestCase
     private function expectConstraintViolation(): void
     {
         $this->expectException(PDOException::class);
+    }
+
+    private function assertSafeTestDatabase(): void
+    {
+        $database = (string) $this->pdo->query('SELECT current_database()')->fetchColumn();
+
+        if (!str_contains(strtolower($database), 'test')) {
+            self::markTestSkipped(sprintf(
+                'Refusing to reset PostgreSQL database "%s"; FLUX_TEST_DATABASE_URL must point to a test database.',
+                $database
+            ));
+        }
+    }
+
+    /**
+     * @param array<string, string> $migrations
+     */
+    private function createTemporaryMigrationDirectory(array $migrations): string
+    {
+        $directory = sys_get_temp_dir() . '/flux_migrations_' . bin2hex(random_bytes(8));
+
+        if (!mkdir($directory) && !is_dir($directory)) {
+            throw new RuntimeException(sprintf('Could not create temporary migration directory: %s', $directory));
+        }
+
+        foreach ($migrations as $filename => $sql) {
+            file_put_contents($directory . DIRECTORY_SEPARATOR . $filename, $sql);
+        }
+
+        return $directory;
+    }
+
+    private function toRegclass(string $table): ?string
+    {
+        $statement = $this->pdo->prepare('SELECT to_regclass(:table)');
+        $statement->execute(['table' => $table]);
+        $result = $statement->fetchColumn();
+
+        return is_string($result) ? $result : null;
     }
 }
