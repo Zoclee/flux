@@ -1,6 +1,6 @@
 # Flux
 
-Flux is a lightweight unified message broker written from scratch in vanilla PHP with PostgreSQL persistence.
+Flux is an unified message broker with PostgreSQL persistence.
 
 Flux is currently pre-MVP. Broker behavior, AMQP 0-9-1 compatibility, and other protocol adapters have not been implemented yet.
 
