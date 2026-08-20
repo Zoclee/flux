@@ -50,7 +50,7 @@ final class SchemaTest extends TestCase
     public function testEveryMigrationIsRecorded(): void
     {
         self::assertSame(
-            9,
+            10,
             (int) $this->pdo->query('SELECT count(*) FROM schema_migrations')->fetchColumn()
         );
     }
@@ -62,7 +62,7 @@ final class SchemaTest extends TestCase
         self::assertSame([], $result->applied);
 
         self::assertSame(
-            9,
+            10,
             (int) $this->pdo->query('SELECT count(*) FROM schema_migrations')->fetchColumn()
         );
         self::assertSame(
@@ -87,6 +87,7 @@ final class SchemaTest extends TestCase
                 '20260820_120006_create_subscriptions',
                 '20260820_120007_create_deliveries',
                 '20260820_120008_enforce_binding_destination_virtual_host',
+                '20260820_120009_enforce_delivery_route_subscription_destination',
             ],
             $statement->fetchAll(PDO::FETCH_COLUMN)
         );
@@ -200,26 +201,54 @@ SQL,
 
     public function testInvalidDeliveryStateFails(): void
     {
-        [$messageRouteId, $subscriptionId] = $this->createRoutedSubscription();
+        [$messageRouteId, $subscriptionId, $destinationId] = $this->createRoutedSubscription();
 
         $this->expectConstraintViolation();
         $this->pdo->exec(sprintf(
-            "INSERT INTO deliveries (message_route_id, subscription_id, state) VALUES (%d, %d, 'unknown')",
+            "INSERT INTO deliveries (message_route_id, subscription_id, destination_id, state) VALUES (%d, %d, %d, 'unknown')",
             $messageRouteId,
-            $subscriptionId
+            $subscriptionId,
+            $destinationId
         ));
     }
 
     public function testNegativeDeliveryAttemptsFail(): void
     {
-        [$messageRouteId, $subscriptionId] = $this->createRoutedSubscription();
+        [$messageRouteId, $subscriptionId, $destinationId] = $this->createRoutedSubscription();
 
         $this->expectConstraintViolation();
         $this->pdo->exec(sprintf(
-            'INSERT INTO deliveries (message_route_id, subscription_id, attempts) VALUES (%d, %d, -1)',
+            'INSERT INTO deliveries (message_route_id, subscription_id, destination_id, attempts) VALUES (%d, %d, %d, -1)',
             $messageRouteId,
-            $subscriptionId
+            $subscriptionId,
+            $destinationId
         ));
+    }
+
+    public function testDeliveryRouteAndSubscriptionMustUseSameDestination(): void
+    {
+        $hostId = $this->virtualHostId('/');
+        $routeDestinationId = $this->insertDestination($hostId, 'route-destination');
+        $subscriptionDestinationId = $this->insertDestination($hostId, 'subscription-destination');
+        $messageId = $this->insertMessage(hex2bin('bb') ?: '');
+        $messageRouteId = $this->insertMessageRoute($messageId, $routeDestinationId);
+
+        $statement = $this->pdo->prepare(
+            "INSERT INTO subscriptions (destination_id, name) VALUES (:destination_id, 'default') RETURNING id"
+        );
+        $statement->execute(['destination_id' => $subscriptionDestinationId]);
+        $subscriptionId = (int) $statement->fetchColumn();
+
+        $this->expectConstraintViolation();
+        $insert = $this->pdo->prepare(
+            'INSERT INTO deliveries (message_route_id, subscription_id, destination_id)
+             VALUES (:message_route_id, :subscription_id, :destination_id)'
+        );
+        $insert->execute([
+            'message_route_id' => $messageRouteId,
+            'subscription_id' => $subscriptionId,
+            'destination_id' => $routeDestinationId,
+        ]);
     }
 
     public function testForeignKeyIntegrityIsEnforced(): void
@@ -312,7 +341,7 @@ SQL,
     }
 
     /**
-     * @return array{0: int, 1: int}
+     * @return array{0: int, 1: int, 2: int}
      */
     private function createRoutedSubscription(): array
     {
@@ -326,7 +355,7 @@ SQL,
         );
         $statement->execute(['destination_id' => $destinationId]);
 
-        return [$messageRouteId, (int) $statement->fetchColumn()];
+        return [$messageRouteId, (int) $statement->fetchColumn(), $destinationId];
     }
 
     private function expectConstraintViolation(): void

@@ -215,11 +215,13 @@ final class SubscriptionRepositoryTest extends TestCase
         $subscription = $this->subscriptions->create($destination->id, 'workers');
 
         $statement = $this->pdo->prepare(
-            'INSERT INTO deliveries (message_route_id, subscription_id) VALUES (:message_route_id, :subscription_id)'
+            'INSERT INTO deliveries (message_route_id, subscription_id, destination_id)
+             VALUES (:message_route_id, :subscription_id, :destination_id)'
         );
         $statement->execute([
             'message_route_id' => $route->id,
             'subscription_id' => $subscription->id,
+            'destination_id' => $destination->id,
         ]);
 
         $this->expectException(PDOException::class);
