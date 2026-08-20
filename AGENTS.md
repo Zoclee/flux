@@ -156,16 +156,16 @@ Do not make schema changes casually. Database changes should be implemented thro
 The Flux administration CLI is:
 
 ```bash
-flux <command>
+php flux <command>
 ```
 
 The executable entry point is:
 
 ```text
-bin/flux
+flux
 ```
 
-Keep this entry point extremely small. Actual CLI implementation belongs under `src/Console/`. Commands belong under `src/Console/Commands/`.
+Keep this project-root entry point extremely small. Actual CLI implementation belongs under `src/Console/`. Commands belong under `src/Console/Commands/`.
 
 The CLI is expected to become a major operational and diagnostic interface for Flux. It should eventually support inspecting queues, messages, consumers, connections, broker status, health, statistics, and troubleshooting information.
 

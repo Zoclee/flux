@@ -27,6 +27,14 @@ final class ApplicationTest extends TestCase
         self::assertSame("Flux 0.1.0-dev\n", $output);
     }
 
+    public function testRootCliEntryPointExists(): void
+    {
+        $projectRoot = dirname(__DIR__, 3);
+
+        self::assertFileExists($projectRoot . '/flux');
+        self::assertFileDoesNotExist($projectRoot . '/bin' . DIRECTORY_SEPARATOR . 'flux');
+    }
+
     /**
      * @param list<string> $argv
      * @return array{0: int, 1: string}

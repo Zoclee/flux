@@ -5,7 +5,7 @@ declare(strict_types=1);
 
 use Flux\Console\Application;
 
-require dirname(__DIR__) . '/vendor/autoload.php';
+require __DIR__ . '/vendor/autoload.php';
 
 $application = new Application();
 

@@ -3,6 +3,9 @@
     "description": "A lightweight unified message broker written from scratch in vanilla PHP.",
     "type": "project",
     "license": "MIT",
+    "bin": [
+        "flux"
+    ],
     "require": {
         "php": "^8.4"
     },

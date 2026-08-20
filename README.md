@@ -18,16 +18,16 @@ composer install
 
 ## CLI
 
-The main command entry point is `bin/flux`:
+The repository command entry point is `flux` at the project root:
 
 ```bash
-php bin/flux
-php bin/flux help
-php bin/flux --version
-php bin/flux migrate
+php flux
+php flux help
+php flux --version
+php flux migrate
 ```
 
-The intended command format is:
+The intended Composer-installed command format is:
 
 ```bash
 flux <command>
@@ -40,8 +40,10 @@ Future commands will live under `src/Console/Commands/`.
 Flux applies PostgreSQL migrations with:
 
 ```bash
-php bin/flux migrate
+php flux migrate
 ```
+
+After Composer installation, the equivalent command is `flux migrate`.
 
 Database configuration is read from normal environment variables:
 
@@ -113,7 +115,7 @@ Live consumers, TCP connections, channels, sockets, and runtime statistics are n
 
 ## Directory Structure
 
-- `bin/` - executable entry points
+- `flux` - project-root CLI entry point
 - `config/` - Flux configuration
 - `database/migrations/` - PostgreSQL schema migrations
 - `src/Broker/` - protocol-neutral broker core
