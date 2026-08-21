@@ -80,7 +80,7 @@ Contains the protocol-neutral Flux broker core.
 
 The broker must not depend on AMQP, MQTT, Kafka, or other wire protocols.
 
-Protocol adapters and broker-operation CLI commands must call the Broker API rather than persistence repositories directly. Read-only administrative CLI commands may continue querying persistence repositories directly for inspection.
+Protocol adapters and broker-operation CLI commands must call the Broker API rather than persistence repositories directly. The current Broker operation boundary covers publish, reserve, acknowledge, reject, and release. Read-only administrative CLI commands may continue querying persistence repositories directly for inspection.
 
 Runtime connections and runtime consumers are process-memory state only. Do not persist live socket, connection, channel, session, or consumer state. Runtime and protocol operation paths must not bypass the Broker API to perform broker operations through repositories directly. Keep server/runtime behavior cross-platform where practical; Unix-only features must be optional and guarded.
 

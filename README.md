@@ -59,7 +59,7 @@ Persistence orchestration
     PostgreSQL
 ```
 
-The Broker API accepts broker-facing concepts such as virtual-host name, routing source, routing key, payload bytes, headers, and message metadata. Future protocol adapters and broker-operation commands should publish through this boundary rather than constructing PostgreSQL repositories directly.
+The Broker API accepts broker-facing concepts such as virtual-host name, routing source, routing key, payload bytes, headers, and message metadata. It now owns the protocol-neutral broker operation boundary for `publish`, `reserve`, `acknowledge`, `reject`, and `release`. Future protocol adapters and broker-operation commands should use this boundary rather than constructing PostgreSQL repositories directly.
 
 The runtime can be started with:
 

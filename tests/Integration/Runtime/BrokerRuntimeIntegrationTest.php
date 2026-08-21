@@ -8,8 +8,11 @@ use Flux\Broker\Broker;
 use Flux\Console\Commands\ServerStartCommand;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\ConnectionConfig;
+use Flux\Persistence\Postgres\DeliveryRepository;
+use Flux\Persistence\Postgres\DestinationRepository;
 use Flux\Persistence\Postgres\Migrator;
 use Flux\Persistence\Postgres\PublishTransaction;
+use Flux\Persistence\Postgres\SubscriptionRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
 use Flux\Runtime\BrokerRuntime;
 use Flux\Runtime\ConnectionRegistry;
@@ -55,7 +58,10 @@ final class BrokerRuntimeIntegrationTest extends TestCase
         $runtime = new BrokerRuntime(
             new Broker(
                 new VirtualHostRepository($this->connection),
-                new PublishTransaction($this->connection)
+                new PublishTransaction($this->connection),
+                new DestinationRepository($this->connection),
+                new SubscriptionRepository($this->connection),
+                new DeliveryRepository($this->connection)
             ),
             $connections,
             $consumers,

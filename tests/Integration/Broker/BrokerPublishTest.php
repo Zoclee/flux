@@ -11,6 +11,7 @@ use Flux\Broker\PublishRequest;
 use Flux\Broker\VirtualHostNotFoundException;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\Connection;
+use Flux\Persistence\Postgres\DeliveryRepository;
 use Flux\Persistence\Postgres\DestinationRepository;
 use Flux\Persistence\Postgres\MessageRepository;
 use Flux\Persistence\Postgres\MessageRouteRepository;
@@ -62,7 +63,13 @@ final class BrokerPublishTest extends TestCase
         $this->messages = new MessageRepository($this->connection);
         $this->routes = new MessageRouteRepository($this->connection);
         $this->subscriptions = new SubscriptionRepository($this->connection);
-        $this->broker = new Broker($virtualHosts, new PublishTransaction($this->connection));
+        $this->broker = new Broker(
+            $virtualHosts,
+            new PublishTransaction($this->connection),
+            $this->destinations,
+            $this->subscriptions,
+            new DeliveryRepository($this->connection)
+        );
         $this->defaultVirtualHostId = $virtualHosts->findByName('/')?->id
             ?? throw new \RuntimeException('Default virtual host was not created by migrations.');
     }

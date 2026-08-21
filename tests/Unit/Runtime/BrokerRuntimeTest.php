@@ -8,7 +8,10 @@ use DateTimeImmutable;
 use Flux\Broker\Broker;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\ConnectionConfig;
+use Flux\Persistence\Postgres\DeliveryRepository;
+use Flux\Persistence\Postgres\DestinationRepository;
 use Flux\Persistence\Postgres\PublishTransaction;
+use Flux\Persistence\Postgres\SubscriptionRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
 use Flux\Runtime\BrokerRuntime;
 use Flux\Runtime\ConnectionRegistry;
@@ -113,7 +116,10 @@ final class BrokerRuntimeTest extends TestCase
 
         return new Broker(
             new VirtualHostRepository($connection),
-            new PublishTransaction($connection)
+            new PublishTransaction($connection),
+            new DestinationRepository($connection),
+            new SubscriptionRepository($connection),
+            new DeliveryRepository($connection)
         );
     }
 }
