@@ -5,7 +5,14 @@ declare(strict_types=1);
 namespace Flux\Console;
 
 use Flux\Console\Commands\DbStatusCommand;
+use Flux\Console\Commands\BindingListCommand;
 use Flux\Console\Commands\MigrateCommand;
+use Flux\Console\Commands\MessagePeekCommand;
+use Flux\Console\Commands\QueueListCommand;
+use Flux\Console\Commands\QueueShowCommand;
+use Flux\Console\Commands\ReadOnlyDatabaseContext;
+use Flux\Console\Commands\SubscriptionListCommand;
+use Flux\Console\Commands\VhostListCommand;
 use Flux\Persistence\Postgres\ConnectionConfig;
 use Flux\Support\Dotenv;
 use Throwable;
@@ -34,6 +41,12 @@ final class Application
             '--version', '-V' => $this->showVersion($output),
             'db:status' => $this->dbStatus($output),
             'migrate' => $this->migrate($output),
+            'vhost:list' => $this->readOnlyCommand(VhostListCommand::class, [], $output),
+            'queue:list' => $this->readOnlyCommand(QueueListCommand::class, [], $output),
+            'queue:show' => $this->readOnlyCommand(QueueShowCommand::class, array_slice($argv, 2), $output, true),
+            'binding:list' => $this->readOnlyCommand(BindingListCommand::class, [], $output),
+            'subscription:list' => $this->readOnlyCommand(SubscriptionListCommand::class, [], $output),
+            'message:peek' => $this->readOnlyCommand(MessagePeekCommand::class, array_slice($argv, 2), $output, true),
             default => $this->showUnknownCommand($command, $output),
         };
     }
@@ -50,10 +63,20 @@ Usage:
   flux <command>
 
 Available commands:
-  help        Display this help message
-  db:status   Show PostgreSQL connection and migration status
-  migrate     Apply pending PostgreSQL database migrations
-  --version   Display the Flux version
+  help                  Display this help message
+  --version             Display the Flux version
+
+Database:
+  db:status             Show PostgreSQL connection and migration status
+  migrate               Apply pending PostgreSQL database migrations
+
+Broker state:
+  vhost:list            List virtual hosts
+  queue:list            List queues
+  queue:show <queue>    Show queue details
+  binding:list          List bindings
+  subscription:list     List subscriptions
+  message:peek <queue>  Inspect queued messages
 
 HELP);
 
@@ -130,6 +153,31 @@ HELP);
             $databaseConfig,
             $projectRoot . '/database/migrations'
         ))->run($output);
+    }
+
+    /**
+     * @param class-string $commandClass
+     * @param list<string> $arguments
+     * @param resource $output
+     */
+    private function readOnlyCommand(string $commandClass, array $arguments, mixed $output, bool $passesArguments = false): int
+    {
+        try {
+            [, $config] = $this->projectContext();
+            $context = new ReadOnlyDatabaseContext(ConnectionConfig::fromArray($config['database']));
+        } catch (Throwable $exception) {
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        $command = new $commandClass($context);
+
+        if (!$passesArguments) {
+            return $command->run($output);
+        }
+
+        return $command->run($arguments, $output);
     }
 
     /**

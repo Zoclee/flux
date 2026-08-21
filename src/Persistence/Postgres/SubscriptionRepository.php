@@ -100,6 +100,44 @@ SQL);
         );
     }
 
+    /**
+     * @param list<int> $destinationIds
+     * @return list<Subscription>
+     */
+    public function allByDestinations(array $destinationIds): array
+    {
+        if ($destinationIds === []) {
+            return [];
+        }
+
+        $placeholders = [];
+        $parameters = [];
+
+        foreach (array_values($destinationIds) as $index => $destinationId) {
+            $name = 'destination_id_' . $index;
+            $placeholders[] = ':' . $name;
+            $parameters[$name] = $destinationId;
+        }
+
+        $statement = $this->connection->pdo()->prepare(sprintf(<<<'SQL'
+SELECT id, destination_id, name, durable, metadata, created_at, updated_at
+FROM subscriptions
+WHERE destination_id IN (%s)
+ORDER BY destination_id, name
+SQL, implode(', ', $placeholders)));
+
+        foreach ($parameters as $name => $destinationId) {
+            $statement->bindValue($name, $destinationId, PDO::PARAM_INT);
+        }
+
+        $statement->execute();
+
+        return array_map(
+            fn (array $row): Subscription => $this->mapRow($row),
+            $statement->fetchAll(PDO::FETCH_ASSOC)
+        );
+    }
+
     public function delete(int $id): bool
     {
         $statement = $this->connection->pdo()->prepare('DELETE FROM subscriptions WHERE id = :id');

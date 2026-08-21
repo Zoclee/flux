@@ -107,6 +107,45 @@ SQL);
     }
 
     /**
+     * @return list<MessageRoute>
+     */
+    public function peekByDestination(int $destinationId, int $limit = 10): array
+    {
+        if ($limit < 1 || $limit > 100) {
+            throw new RuntimeException('Message route peek limit must be between 1 and 100.');
+        }
+
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT id, message_id, destination_id, available_at, expires_at, created_at
+FROM message_routes
+WHERE destination_id = :destination_id
+ORDER BY available_at, id
+LIMIT :limit
+SQL);
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->bindValue('limit', $limit, PDO::PARAM_INT);
+        $statement->execute();
+
+        return array_map(
+            fn (array $row): MessageRoute => $this->mapRow($row),
+            $statement->fetchAll(PDO::FETCH_ASSOC)
+        );
+    }
+
+    public function countByDestination(int $destinationId): int
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT COUNT(*)
+FROM message_routes
+WHERE destination_id = :destination_id
+SQL);
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->execute();
+
+        return (int) $statement->fetchColumn();
+    }
+
+    /**
      * @param array{
      *     id: mixed,
      *     message_id: mixed,

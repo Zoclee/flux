@@ -18,6 +18,12 @@ final class ApplicationTest extends TestCase
         self::assertStringContainsString('Usage:', $output);
         self::assertStringContainsString('db:status', $output);
         self::assertStringContainsString('migrate', $output);
+        self::assertStringContainsString('vhost:list', $output);
+        self::assertStringContainsString('queue:list', $output);
+        self::assertStringContainsString('queue:show <queue>', $output);
+        self::assertStringContainsString('binding:list', $output);
+        self::assertStringContainsString('subscription:list', $output);
+        self::assertStringContainsString('message:peek <queue>', $output);
     }
 
     public function testItPrintsTheVersion(): void

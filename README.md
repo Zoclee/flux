@@ -26,6 +26,12 @@ php flux help
 php flux --version
 php flux db:status
 php flux migrate
+php flux vhost:list
+php flux queue:list
+php flux queue:show orders
+php flux binding:list
+php flux subscription:list
+php flux message:peek orders
 ```
 
 The intended Composer-installed command format is:
@@ -34,7 +40,7 @@ The intended Composer-installed command format is:
 flux <command>
 ```
 
-Future commands will live under `src/Console/Commands/`.
+Queue, binding, subscription, and message commands are administrative inspection commands over persisted state. Flux is not yet a functional network broker.
 
 ### Database Migrations
 

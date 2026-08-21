@@ -90,6 +90,44 @@ SQL);
     }
 
     /**
+     * @param list<int> $ids
+     * @return list<Message>
+     */
+    public function findByIds(array $ids): array
+    {
+        if ($ids === []) {
+            return [];
+        }
+
+        $placeholders = [];
+        $parameters = [];
+
+        foreach (array_values(array_unique($ids)) as $index => $id) {
+            $name = 'id_' . $index;
+            $placeholders[] = ':' . $name;
+            $parameters[$name] = $id;
+        }
+
+        $statement = $this->connection->pdo()->prepare(sprintf(<<<'SQL'
+SELECT id, message_id, payload, headers, content_type, content_encoding, priority, persistent, created_at
+FROM messages
+WHERE id IN (%s)
+ORDER BY id
+SQL, implode(', ', $placeholders)));
+
+        foreach ($parameters as $name => $id) {
+            $statement->bindValue($name, $id, PDO::PARAM_INT);
+        }
+
+        $statement->execute();
+
+        return array_map(
+            fn (array $row): Message => $this->mapRow($row),
+            $statement->fetchAll(PDO::FETCH_ASSOC)
+        );
+    }
+
+    /**
      * @param array{
      *     id: mixed,
      *     message_id: mixed,

@@ -109,6 +109,26 @@ SQL);
         );
     }
 
+    /**
+     * @return list<Binding>
+     */
+    public function allByVirtualHost(int $virtualHostId): array
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT id, virtual_host_id, source, destination_id, routing_key, metadata, created_at
+FROM bindings
+WHERE virtual_host_id = :virtual_host_id
+ORDER BY source, routing_key, id
+SQL);
+        $statement->bindValue('virtual_host_id', $virtualHostId, PDO::PARAM_INT);
+        $statement->execute();
+
+        return array_map(
+            fn (array $row): Binding => $this->mapRow($row),
+            $statement->fetchAll(PDO::FETCH_ASSOC)
+        );
+    }
+
     public function delete(int $id): bool
     {
         $statement = $this->connection->pdo()->prepare('DELETE FROM bindings WHERE id = :id');
