@@ -1,0 +1,160 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Flux\Tests\Integration\Runtime;
+
+use Flux\Broker\Broker;
+use Flux\Console\Commands\ServerStartCommand;
+use Flux\Persistence\Postgres\Connection;
+use Flux\Persistence\Postgres\ConnectionConfig;
+use Flux\Persistence\Postgres\Migrator;
+use Flux\Persistence\Postgres\PublishTransaction;
+use Flux\Persistence\Postgres\VirtualHostRepository;
+use Flux\Runtime\BrokerRuntime;
+use Flux\Runtime\ConnectionRegistry;
+use Flux\Runtime\ConsumerRegistry;
+use Flux\Runtime\RuntimeState;
+use PDO;
+use PHPUnit\Framework\Attributes\Before;
+use PHPUnit\Framework\TestCase;
+
+final class BrokerRuntimeIntegrationTest extends TestCase
+{
+    private Connection $connection;
+    private ConnectionConfig $config;
+    private PDO $pdo;
+
+    #[Before]
+    public function setUpRuntimeDatabase(): void
+    {
+        if (!extension_loaded('pdo_pgsql')) {
+            self::markTestSkipped('The pdo_pgsql extension is required for PostgreSQL integration tests.');
+        }
+
+        $dsn = getenv('FLUX_TEST_DATABASE_URL');
+
+        if ($dsn === false || $dsn === '') {
+            self::markTestSkipped('Set FLUX_TEST_DATABASE_URL to run PostgreSQL runtime integration tests.');
+        }
+
+        $this->connection = Connection::fromDsn($dsn);
+        $this->config = $this->connection->config();
+        $this->pdo = $this->connection->pdo();
+
+        $this->assertSafeTestDatabase();
+        $this->resetSchema();
+        (new Migrator($this->connection, dirname(__DIR__, 3) . '/database/migrations'))->migrate();
+    }
+
+    public function testRuntimeConstructsAgainstDatabaseAndStopsWithoutMutatingBrokerState(): void
+    {
+        $before = $this->brokerTableCounts();
+        $connections = new ConnectionRegistry();
+        $consumers = new ConsumerRegistry();
+        $runtime = new BrokerRuntime(
+            new Broker(
+                new VirtualHostRepository($this->connection),
+                new PublishTransaction($this->connection)
+            ),
+            $connections,
+            $consumers,
+            0,
+            static function (): void {
+            }
+        );
+
+        self::assertSame(RuntimeState::Created, $runtime->state());
+        self::assertSame(0, $connections->count());
+        self::assertSame(0, $consumers->count());
+
+        $runtime->run(maxIterations: 1);
+
+        self::assertSame(RuntimeState::Stopped, $runtime->state());
+        self::assertSame(1, $runtime->tickCount());
+        self::assertSame(0, $connections->count());
+        self::assertSame(0, $consumers->count());
+        self::assertSame($before, $this->brokerTableCounts());
+    }
+
+    public function testServerStartCommandBootstrapsRuntimeWithoutHanging(): void
+    {
+        $stream = fopen('php://memory', 'w+');
+
+        self::assertIsResource($stream);
+
+        $command = new ServerStartCommand(
+            $this->config,
+            '0.1.0-dev',
+            function (Broker $broker, ConnectionRegistry $connections, ConsumerRegistry $consumers): BrokerRuntime {
+                $runtime = null;
+                $runtime = new BrokerRuntime(
+                    $broker,
+                    $connections,
+                    $consumers,
+                    0,
+                    static function () use (&$runtime): void {
+                        $runtime?->requestShutdown();
+                    }
+                );
+
+                return $runtime;
+            }
+        );
+
+        $before = $this->brokerTableCounts();
+        $exitCode = $command->run($stream);
+        rewind($stream);
+        $output = stream_get_contents($stream);
+        fclose($stream);
+
+        self::assertIsString($output);
+        self::assertSame(0, $exitCode);
+        self::assertStringContainsString('Flux Message Broker', $output);
+        self::assertStringContainsString('Status:   starting', $output);
+        self::assertStringContainsString('Database: connected', $output);
+        self::assertStringContainsString("Protocols:\n  none configured", $output);
+        self::assertStringContainsString('Runtime started.', $output);
+        self::assertStringContainsString('Runtime stopped.', $output);
+        self::assertSame($before, $this->brokerTableCounts());
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function brokerTableCounts(): array
+    {
+        return [
+            'virtual_hosts' => $this->tableCount('virtual_hosts'),
+            'destinations' => $this->tableCount('destinations'),
+            'bindings' => $this->tableCount('bindings'),
+            'subscriptions' => $this->tableCount('subscriptions'),
+            'messages' => $this->tableCount('messages'),
+            'message_routes' => $this->tableCount('message_routes'),
+            'deliveries' => $this->tableCount('deliveries'),
+        ];
+    }
+
+    private function tableCount(string $table): int
+    {
+        return (int) $this->pdo->query(sprintf('SELECT count(*) FROM %s', $table))->fetchColumn();
+    }
+
+    private function resetSchema(): void
+    {
+        $this->pdo->exec('DROP SCHEMA public CASCADE');
+        $this->pdo->exec('CREATE SCHEMA public');
+    }
+
+    private function assertSafeTestDatabase(): void
+    {
+        $database = (string) $this->pdo->query('SELECT current_database()')->fetchColumn();
+
+        if (!str_contains(strtolower($database), 'test')) {
+            self::markTestSkipped(sprintf(
+                'Refusing to reset PostgreSQL database "%s"; FLUX_TEST_DATABASE_URL must point to a test database.',
+                $database
+            ));
+        }
+    }
+}

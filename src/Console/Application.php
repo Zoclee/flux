@@ -11,6 +11,7 @@ use Flux\Console\Commands\MessagePeekCommand;
 use Flux\Console\Commands\QueueListCommand;
 use Flux\Console\Commands\QueueShowCommand;
 use Flux\Console\Commands\ReadOnlyDatabaseContext;
+use Flux\Console\Commands\ServerStartCommand;
 use Flux\Console\Commands\SubscriptionListCommand;
 use Flux\Console\Commands\VhostListCommand;
 use Flux\Persistence\Postgres\ConnectionConfig;
@@ -41,6 +42,7 @@ final class Application
             '--version', '-V' => $this->showVersion($output),
             'db:status' => $this->dbStatus($output),
             'migrate' => $this->migrate($output),
+            'server:start' => $this->serverStart($output),
             'vhost:list' => $this->readOnlyCommand(VhostListCommand::class, [], $output),
             'queue:list' => $this->readOnlyCommand(QueueListCommand::class, [], $output),
             'queue:show' => $this->readOnlyCommand(QueueShowCommand::class, array_slice($argv, 2), $output, true),
@@ -69,6 +71,9 @@ Available commands:
 Database:
   db:status             Show PostgreSQL connection and migration status
   migrate               Apply pending PostgreSQL database migrations
+
+Server:
+  server:start          Start the Flux broker runtime
 
 Broker state:
   vhost:list            List virtual hosts
@@ -153,6 +158,25 @@ HELP);
             $databaseConfig,
             $projectRoot . '/database/migrations'
         ))->run($output);
+    }
+
+    /**
+     * @param resource $output
+     */
+    private function serverStart(mixed $output): int
+    {
+        try {
+            [, $config] = $this->projectContext();
+            $databaseConfig = ConnectionConfig::fromArray($config['database']);
+        } catch (Throwable $exception) {
+            $this->write($output, "Flux Message Broker\n\n");
+            $this->write($output, "Status:   stopped\n\n");
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        return (new ServerStartCommand($databaseConfig, self::VERSION))->run($output);
     }
 
     /**

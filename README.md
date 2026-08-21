@@ -2,7 +2,7 @@
 
 Flux is an unified message broker with PostgreSQL persistence.
 
-Flux is currently pre-MVP. Broker behavior, AMQP 0-9-1 compatibility, and other protocol adapters have not been implemented yet.
+Flux is currently pre-MVP. Phase 2 development has begun with a protocol-neutral in-process Broker publish API over the PostgreSQL persistence layer. AMQP 0-9-1 compatibility, networking, runtime consumers, and other protocol adapters have not been implemented yet.
 
 ## Requirements
 
@@ -26,6 +26,7 @@ php flux help
 php flux --version
 php flux db:status
 php flux migrate
+php flux server:start
 php flux vhost:list
 php flux queue:list
 php flux queue:show orders
@@ -41,6 +42,32 @@ flux <command>
 ```
 
 Queue, binding, subscription, and message commands are administrative inspection commands over persisted state. Flux is not yet a functional network broker.
+
+## Broker API
+
+Flux now exposes publishing through the protocol-neutral `Flux\Broker\Broker` service. It also has a foreground, long-running protocol-neutral runtime that can host future protocol adapters:
+
+```text
+Protocol adapters (future)
+        |
+   Broker Runtime
+        |
+      Broker
+        |
+Persistence orchestration
+        |
+    PostgreSQL
+```
+
+The Broker API accepts broker-facing concepts such as virtual-host name, routing source, routing key, payload bytes, headers, and message metadata. Future protocol adapters and broker-operation commands should publish through this boundary rather than constructing PostgreSQL repositories directly.
+
+The runtime can be started with:
+
+```bash
+php flux server:start
+```
+
+It verifies PostgreSQL connectivity, starts the in-memory runtime registries, and remains in the foreground until shutdown. No external messaging protocol listener is implemented yet, so the server reports that no protocols are configured. AMQP support remains future work.
 
 ### Database Migrations
 
