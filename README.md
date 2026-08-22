@@ -81,6 +81,7 @@ php flux server:start
 php flux connection:list
 php flux consumer:list
 php flux broker:stats
+php flux vhost:create /development
 php flux vhost:list
 php flux queue:list
 php flux queue:show orders

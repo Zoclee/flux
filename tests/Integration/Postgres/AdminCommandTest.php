@@ -13,6 +13,7 @@ use Flux\Console\Commands\QueueListCommand;
 use Flux\Console\Commands\QueueShowCommand;
 use Flux\Console\Commands\ReadOnlyDatabaseContext;
 use Flux\Console\Commands\SubscriptionListCommand;
+use Flux\Console\Commands\VhostCreateCommand;
 use Flux\Console\Commands\VhostListCommand;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\Connection;
@@ -83,6 +84,48 @@ final class AdminCommandTest extends TestCase
         self::assertStringContainsString('/', $output);
         self::assertStringContainsString('development', $output);
         self::assertStringContainsString('2 virtual hosts.', $output);
+    }
+
+    public function testVhostCreatePersistsVirtualHostAndListShowsIt(): void
+    {
+        [$exitCode, $output] = $this->runArgumentCommand(new VhostCreateCommand($this->connection), ['/development']);
+
+        self::assertSame(0, $exitCode);
+        self::assertSame("Virtual host created: /development\n", $output);
+        self::assertNotNull($this->virtualHosts->findByName('/development'));
+        self::assertNotNull($this->virtualHosts->findByName('/'));
+
+        [$listExitCode, $listOutput] = $this->runSimpleCommand(new VhostListCommand($this->context));
+
+        self::assertSame(0, $listExitCode);
+        self::assertStringContainsString('/', $listOutput);
+        self::assertStringContainsString('/development', $listOutput);
+        self::assertStringContainsString('2 virtual hosts.', $listOutput);
+    }
+
+    public function testVhostCreateFailsClearlyForDuplicateVirtualHost(): void
+    {
+        $this->virtualHosts->create('/development');
+
+        [$exitCode, $output] = $this->runArgumentCommand(new VhostCreateCommand($this->connection), ['/development']);
+
+        self::assertSame(1, $exitCode);
+        self::assertSame("ERROR: Virtual host \"/development\" already exists.\n", $output);
+    }
+
+    public function testVhostCreateRejectsMissingEmptyAndExtraArguments(): void
+    {
+        $command = new VhostCreateCommand($this->connection);
+
+        foreach ([[], [''], ['/development', 'extra']] as $arguments) {
+            [$exitCode, $output] = $this->runArgumentCommand($command, $arguments);
+
+            self::assertSame(1, $exitCode);
+            self::assertSame("Usage: flux vhost:create <name>\n", $output);
+        }
+
+        self::assertNotNull($this->virtualHosts->findByName('/'));
+        self::assertSame(1, $this->virtualHosts->countAll());
     }
 
     public function testQueueListListsOnlyDefaultVirtualHostQueuesAndHandlesEmptyResult(): void
