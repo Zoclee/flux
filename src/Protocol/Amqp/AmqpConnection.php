@@ -8,6 +8,8 @@ use DateTimeImmutable;
 use Flux\Broker\AcknowledgeRequest;
 use Flux\Broker\AuthenticatedUser;
 use Flux\Broker\AuthenticationService;
+use Flux\Broker\AuthorizationPermission;
+use Flux\Broker\AuthorizationService;
 use Flux\Broker\Broker;
 use Flux\Broker\Delivery;
 use Flux\Broker\Message;
@@ -100,6 +102,7 @@ final class AmqpConnection
         private readonly int $maxFrameSize = 131072,
         private readonly ?Broker $broker = null,
         private readonly ?AuthenticationService $authenticator = null,
+        private readonly ?AuthorizationService $authorizer = null,
         ?ConsumerRegistry $consumers = null,
         private readonly int $maxMessageSize = 10485760,
         private readonly int $heartbeatInterval = 60,
@@ -352,6 +355,7 @@ final class AmqpConnection
                 [60, 10] => $this->handleBasicQos($frame),
                 [60, 40] => $this->handleBasicPublish($frame),
                 [60, 20] => $this->handleBasicConsume($frame),
+                [60, 70] => $this->handleBasicGet($frame),
                 [60, 80] => $this->handleBasicAck($frame),
                 [60, 90] => $this->handleBasicReject($frame),
                 [60, 120] => $this->handleBasicNack($frame),
@@ -509,6 +513,10 @@ final class AmqpConnection
             throw new TopologyException('Exclusive queues are not supported yet.', TopologyException::NOT_IMPLEMENTED);
         }
 
+        if (!$this->authorizeResource($frame->channel, AuthorizationPermission::Configure, $queue, 50, 10)) {
+            return;
+        }
+
         $destination = $this->broker()->declareQueue($this->openedVirtualHost(), $queue, $durable, $autoDelete, $passive);
 
         if (!$noWait) {
@@ -548,6 +556,10 @@ final class AmqpConnection
             throw new TopologyException('Internal exchanges are not supported yet.', TopologyException::NOT_IMPLEMENTED);
         }
 
+        if (!$this->authorizeResource($frame->channel, AuthorizationPermission::Configure, $exchange, 40, 10)) {
+            return;
+        }
+
         $this->broker()->declareDirectRoutingSource($this->openedVirtualHost(), $exchange, $durable, $autoDelete, $passive);
 
         if (!$noWait) {
@@ -566,6 +578,13 @@ final class AmqpConnection
         $noWait = ($bits & 0b00000001) !== 0;
         $reader->skipTable();
         $reader->assertComplete();
+
+        if (
+            !$this->authorizeResource($frame->channel, AuthorizationPermission::Configure, $queue, 50, 20)
+            || ($exchange !== '' && !$this->authorizeResource($frame->channel, AuthorizationPermission::Configure, $exchange, 50, 20))
+        ) {
+            return;
+        }
 
         $this->broker()->bindQueue($this->openedVirtualHost(), $exchange, $queue, $routingKey);
 
@@ -586,6 +605,11 @@ final class AmqpConnection
         $routingKey = $reader->readShortString();
         $bits = $reader->readOctet();
         $reader->assertComplete();
+
+        $resource = $exchange === '' ? $routingKey : $exchange;
+        if (!$this->authorizeResource($frame->channel, AuthorizationPermission::Write, $resource, 60, 40)) {
+            return;
+        }
 
         $this->pendingPublishMethods[$frame->channel] = [
             'exchange' => $exchange,
@@ -625,6 +649,10 @@ final class AmqpConnection
             throw new TopologyException(sprintf('Consumer tag "%s" is already active.', $consumerTag), TopologyException::PRECONDITION_FAILED);
         }
 
+        if (!$this->authorizeResource($frame->channel, AuthorizationPermission::Read, $queue, 60, 20)) {
+            return;
+        }
+
         $this->broker()->ensureQueueSubscription($this->openedVirtualHost(), $queue, 'amqp');
         $consumer = RuntimeConsumer::create(
             $this->runtimeConnection->id,
@@ -646,6 +674,21 @@ final class AmqpConnection
         }
 
         $this->deliverToConsumers();
+    }
+
+    private function handleBasicGet(Frame $frame): void
+    {
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readShort();
+        $queue = $reader->readShortString();
+        $reader->readOctet();
+        $reader->assertComplete();
+
+        if (!$this->authorizeResource($frame->channel, AuthorizationPermission::Read, $queue, 60, 70)) {
+            return;
+        }
+
+        $this->sendChannelError($frame->channel, 540, 'NOT_IMPLEMENTED - basic.get is not supported by Flux yet', 60, 70);
     }
 
     private function handleBasicAck(Frame $frame): void
@@ -1113,6 +1156,45 @@ final class AmqpConnection
     private function authenticator(): AuthenticationService
     {
         return $this->authenticator ?? throw new RuntimeException('AMQP authentication requires an authenticator.');
+    }
+
+    private function authorizer(): AuthorizationService
+    {
+        return $this->authorizer ?? throw new RuntimeException('AMQP authorization requires an authorizer.');
+    }
+
+    private function authenticatedUser(): AuthenticatedUser
+    {
+        return $this->authenticatedUser ?? throw new RuntimeException('AMQP authorization requires an authenticated user.');
+    }
+
+    private function authorizeResource(
+        int $channel,
+        AuthorizationPermission $permission,
+        string $resource,
+        int $classId,
+        int $methodId
+    ): bool {
+        $result = $this->authorizer()->authorize(
+            $this->authenticatedUser(),
+            $this->openedVirtualHost(),
+            $permission,
+            $resource
+        );
+
+        if ($result->allowed) {
+            return true;
+        }
+
+        $this->sendChannelError(
+            $channel,
+            403,
+            sprintf('ACCESS_REFUSED - %s permission refused for resource "%s"', $permission->value, $resource),
+            $classId,
+            $methodId
+        );
+
+        return false;
     }
 
     private function openedVirtualHost(): string

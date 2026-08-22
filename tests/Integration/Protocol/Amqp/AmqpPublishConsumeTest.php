@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Flux\Tests\Integration\Protocol\Amqp;
 
 use Flux\Broker\Broker;
+use Flux\Broker\Authorizer;
 use Flux\Broker\Authenticator;
 use Flux\Broker\DeliveryState;
 use Flux\Persistence\Postgres\BindingRepository;
@@ -62,6 +63,7 @@ final class AmqpPublishConsumeTest extends TestCase
         $users = new UserRepository($this->connection);
         $users->create('guest', 'guest');
         $users->grantVirtualHost('guest', '/');
+        $users->setPermissions('guest', '/', '.*', '.*', '.*');
     }
 
     public function testDefaultExchangePublishConsumeAndAckPreservesBinaryBodyAndProperties(): void
@@ -146,6 +148,62 @@ final class AmqpPublishConsumeTest extends TestCase
 
             self::assertSame([10, 50], $this->readMethod($listener, $client));
             self::assertSame(0, $connections->count());
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testDeniedPublishClosesChannelWithAccessRefused(): void
+    {
+        (new UserRepository($this->connection))->setPermissions('guest', '/', '.*', '^allowed$', '.*');
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('orders.direct', 'created'));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(403, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testDeniedConsumeClosesChannelWithAccessRefused(): void
+    {
+        $this->broker()->declareQueue('/', 'orders', true, false);
+        (new UserRepository($this->connection))->setPermissions('guest', '/', '.*', '.*', '^allowed$');
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(403, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testDeniedBasicGetClosesChannelWithAccessRefused(): void
+    {
+        $this->broker()->declareQueue('/', 'orders', true, false);
+        (new UserRepository($this->connection))->setPermissions('guest', '/', '.*', '.*', '^allowed$');
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('orders'));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(403, $this->replyCode($close));
         } finally {
             fclose($client);
             $listener->stop();
@@ -237,6 +295,7 @@ final class AmqpPublishConsumeTest extends TestCase
             0,
             broker: $this->broker(),
             authenticator: $this->authenticator(),
+            authorizer: $this->authorizer(),
             consumers: $consumers,
             heartbeatInterval: 1,
             clock: static function () use (&$now): int {
@@ -516,6 +575,7 @@ final class AmqpPublishConsumeTest extends TestCase
             0,
             broker: $this->broker(),
             authenticator: $this->authenticator(),
+            authorizer: $this->authorizer(),
             consumers: new ConsumerRegistry()
         );
         $listener->start();
@@ -807,6 +867,7 @@ final class AmqpPublishConsumeTest extends TestCase
             0,
             broker: $this->broker(),
             authenticator: $this->authenticator(),
+            authorizer: $this->authorizer(),
             consumers: new ConsumerRegistry()
         );
         $listener->start();
@@ -866,6 +927,11 @@ final class AmqpPublishConsumeTest extends TestCase
     private function basicConsume(string $queue, string $consumerTag): string
     {
         return pack('n', 0) . $this->shortString($queue) . $this->shortString($consumerTag) . "\x00" . pack('N', 0);
+    }
+
+    private function basicGet(string $queue): string
+    {
+        return pack('n', 0) . $this->shortString($queue) . "\x00";
     }
 
     private function basicQos(int $prefetchSize, int $prefetchCount, bool $global): string
@@ -1038,6 +1104,13 @@ final class AmqpPublishConsumeTest extends TestCase
         return $reader->readLongLong();
     }
 
+    private function replyCode(Frame $frame): int
+    {
+        $value = unpack('nreplyCode', substr($frame->payload, 4, 2));
+
+        return (int) $value['replyCode'];
+    }
+
     /**
      * @param resource $client
      * @return array{0: int, 1: int}
@@ -1144,6 +1217,11 @@ final class AmqpPublishConsumeTest extends TestCase
     private function authenticator(): Authenticator
     {
         return new Authenticator(new UserRepository($this->connection));
+    }
+
+    private function authorizer(): Authorizer
+    {
+        return new Authorizer(new UserRepository($this->connection));
     }
 
     private function resetSchema(): void

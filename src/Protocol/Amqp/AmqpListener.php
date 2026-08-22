@@ -6,6 +6,7 @@ namespace Flux\Protocol\Amqp;
 
 use Flux\Broker\Broker;
 use Flux\Broker\AuthenticationService;
+use Flux\Broker\AuthorizationService;
 use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
 use Flux\Runtime\RuntimeComponent;
@@ -30,6 +31,7 @@ final class AmqpListener implements RuntimeComponent
         private readonly int $maxFrameSize = 131072,
         private readonly ?Broker $broker = null,
         private readonly ?AuthenticationService $authenticator = null,
+        private readonly ?AuthorizationService $authorizer = null,
         private readonly ?ConsumerRegistry $consumers = null,
         private readonly int $heartbeatInterval = 60,
         private readonly mixed $clock = null
@@ -88,6 +90,7 @@ final class AmqpListener implements RuntimeComponent
                 $this->maxFrameSize,
                 $this->broker,
                 $this->authenticator,
+                $this->authorizer,
                 $this->consumers,
                 heartbeatInterval: $this->heartbeatInterval,
                 clock: $this->clock

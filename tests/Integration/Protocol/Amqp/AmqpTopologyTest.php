@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Flux\Tests\Integration\Protocol\Amqp;
 
 use Flux\Broker\Broker;
+use Flux\Broker\Authorizer;
 use Flux\Broker\Authenticator;
 use Flux\Broker\DestinationType;
 use Flux\Persistence\Postgres\BindingRepository;
@@ -54,6 +55,7 @@ final class AmqpTopologyTest extends TestCase
         $users = new UserRepository($this->connection);
         $users->create('guest', 'guest');
         $users->grantVirtualHost('guest', '/');
+        $users->setPermissions('guest', '/', '.*', '.*', '.*');
     }
 
     public function testAmqpCanDeclareQueueExchangeBindAndCloseChannel(): void
@@ -137,6 +139,65 @@ final class AmqpTopologyTest extends TestCase
         }
     }
 
+    public function testDeniedQueueDeclareClosesChannelWithAccessRefused(): void
+    {
+        (new UserRepository($this->connection))->setPermissions('guest', '/', '^allowed$', '.*', '.*');
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 10, $this->queueDeclare('orders', durable: true))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(403, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testDeniedExchangeDeclareClosesChannelWithAccessRefused(): void
+    {
+        (new UserRepository($this->connection))->setPermissions('guest', '/', '^allowed$', '.*', '.*');
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('orders.direct', 'direct'))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(403, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testDeniedBindingClosesChannelWithAccessRefused(): void
+    {
+        $this->broker()->declareQueue('/', 'orders', true, false);
+        $this->broker()->declareDirectRoutingSource('/', 'orders.direct', true, false);
+        (new UserRepository($this->connection))->setPermissions('guest', '/', '^orders$', '.*', '.*');
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 20, $this->queueBind('orders', 'orders.direct', 'created'))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(403, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     /**
      * @return array{0: AmqpListener, 1: resource}
      */
@@ -147,7 +208,8 @@ final class AmqpTopologyTest extends TestCase
             '127.0.0.1',
             0,
             broker: $this->broker(),
-            authenticator: $this->authenticator()
+            authenticator: $this->authenticator(),
+            authorizer: $this->authorizer()
         );
         $listener->start();
         $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $listener->port()), $errorCode, $errorMessage, 1.0);
@@ -227,6 +289,11 @@ final class AmqpTopologyTest extends TestCase
         return new Authenticator(new UserRepository($this->connection));
     }
 
+    private function authorizer(): Authorizer
+    {
+        return new Authorizer(new UserRepository($this->connection));
+    }
+
     private function tuneOk(int $heartbeat): string
     {
         return pack('nNn', 0, 131072, $heartbeat);
@@ -238,6 +305,14 @@ final class AmqpTopologyTest extends TestCase
      */
     private function readMethod(AmqpListener $listener, mixed $client): array
     {
+        return $this->readMethodFrame($listener, $client)->method();
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function readMethodFrame(AmqpListener $listener, mixed $client): Frame
+    {
         $codec = new FrameCodec();
 
         for ($attempt = 0; $attempt < 100; $attempt++) {
@@ -246,13 +321,22 @@ final class AmqpTopologyTest extends TestCase
             if (is_string($bytes) && $bytes !== '') {
                 $frames = $codec->push($bytes);
                 if ($frames !== []) {
-                    return $frames[0]->method();
+                    self::assertSame(Frame::TYPE_METHOD, $frames[0]->type);
+
+                    return $frames[0];
                 }
             }
             usleep(1000);
         }
 
         self::fail('Timed out waiting for AMQP method frame.');
+    }
+
+    private function replyCode(Frame $frame): int
+    {
+        $value = unpack('nreplyCode', substr($frame->payload, 4, 2));
+
+        return (int) $value['replyCode'];
     }
 
     private function broker(): Broker

@@ -6,6 +6,7 @@ namespace Flux\Console\Commands;
 
 use Flux\Broker\Broker;
 use Flux\Broker\Authenticator;
+use Flux\Broker\Authorizer;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\ConnectionConfig;
 use Flux\Persistence\Postgres\DeliveryRepository;
@@ -79,7 +80,9 @@ final class ServerStartCommand
         try {
             $connection = Connection::fromConfig($this->config);
             $connection->pdo();
-            $authenticator = new Authenticator(new UserRepository($connection));
+            $users = new UserRepository($connection);
+            $authenticator = new Authenticator($users);
+            $authorizer = new Authorizer($users);
 
             $broker = new Broker(
                 new VirtualHostRepository($connection),
@@ -94,7 +97,7 @@ final class ServerStartCommand
             );
             $connections = new ConnectionRegistry();
             $consumers = new ConsumerRegistry();
-            $runtime = $this->createRuntime($broker, $authenticator, $connections, $consumers);
+            $runtime = $this->createRuntime($broker, $authenticator, $authorizer, $connections, $consumers);
         } catch (Throwable $exception) {
             $this->write($output, "Database: disconnected\n\n");
             $this->write($output, sprintf("ERROR: %s\n", $this->config->redact($exception->getMessage())));
@@ -159,6 +162,7 @@ final class ServerStartCommand
     private function createRuntime(
         Broker $broker,
         Authenticator $authenticator,
+        Authorizer $authorizer,
         ConnectionRegistry $connections,
         ConsumerRegistry $consumers
     ): BrokerRuntime {
@@ -177,6 +181,7 @@ final class ServerStartCommand
                     $this->amqpPort,
                     broker: $broker,
                     authenticator: $authenticator,
+                    authorizer: $authorizer,
                     consumers: $consumers,
                     heartbeatInterval: $this->amqpHeartbeat
                 ),
