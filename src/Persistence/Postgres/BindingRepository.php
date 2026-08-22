@@ -113,6 +113,29 @@ SQL);
     /**
      * @return list<Binding>
      */
+    public function findForSource(int $virtualHostId, string $source): array
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT id, virtual_host_id, source, destination_id, routing_key, metadata, created_at
+FROM bindings
+WHERE virtual_host_id = :virtual_host_id
+  AND source = :source
+ORDER BY id
+SQL);
+        $statement->execute([
+            'virtual_host_id' => $virtualHostId,
+            'source' => $source,
+        ]);
+
+        return array_map(
+            fn (array $row): Binding => $this->mapRow($row),
+            $statement->fetchAll(PDO::FETCH_ASSOC)
+        );
+    }
+
+    /**
+     * @return list<Binding>
+     */
     public function allByDestination(int $destinationId): array
     {
         $statement = $this->connection->pdo()->prepare(<<<'SQL'

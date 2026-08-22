@@ -8,6 +8,7 @@ use Flux\Broker\Broker;
 use Flux\Broker\DeliveryState;
 use Flux\Broker\Destination;
 use Flux\Broker\PublishRequest;
+use Flux\Broker\RoutingSourceType;
 use Flux\Broker\TopologyException;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\Connection;
@@ -130,6 +131,51 @@ final class BrokerTopologyManagementTest extends TestCase
         $this->broker->deleteRoutingSource('/', 'orders.direct');
         self::assertNull($this->routingSources->findByName($this->virtualHostId, 'orders.direct'));
         self::assertSame(0, $this->bindings->countBySource($this->virtualHostId, 'orders.direct'));
+    }
+
+    public function testFanoutRoutingSourceDeclarationRedeclarationAndIncompatibility(): void
+    {
+        $fanout = $this->broker->declareFanoutRoutingSource('/', 'events', true, false);
+        $again = $this->broker->declareFanoutRoutingSource('/', 'events', true, false);
+
+        self::assertSame($fanout->id, $again->id);
+        self::assertSame(RoutingSourceType::Fanout, $again->type);
+
+        try {
+            $this->broker->declareDirectRoutingSource('/', 'events', true, false);
+            self::fail('Redeclaring a fanout routing source as direct should fail.');
+        } catch (TopologyException $exception) {
+            self::assertSame(TopologyException::PRECONDITION_FAILED, $exception->reason);
+        }
+    }
+
+    public function testFanoutBindPublishUnbindAndDelete(): void
+    {
+        $orders = $this->broker->declareQueue('/', 'orders', true, false);
+        $audit = $this->broker->declareQueue('/', 'audit', true, false);
+        $unbound = $this->broker->declareQueue('/', 'unbound', true, false);
+        $this->broker->declareFanoutRoutingSource('/', 'events', true, false);
+        $this->broker->bindQueue('/', 'events', 'orders', 'orders-key');
+        $this->broker->bindQueue('/', 'events', 'audit', 'audit-key');
+
+        $result = $this->broker->publish(new PublishRequest('/', 'events', 'ignored', 'payload', persistUnrouted: false));
+
+        self::assertSame(1, $this->tableCount('messages'));
+        self::assertSame(2, $result->routeCount());
+        self::assertEqualsCanonicalizing(
+            [$orders->id, $audit->id],
+            array_map(static fn ($route): int => $route->destinationId, $result->routes)
+        );
+        self::assertNotContains($unbound->id, array_map(static fn ($route): int => $route->destinationId, $result->routes));
+
+        $this->broker->unbindQueue('/', 'events', 'audit', 'audit-key');
+        $afterUnbind = $this->broker->publish(new PublishRequest('/', 'events', 'still-ignored', 'payload', persistUnrouted: false));
+        self::assertSame(1, $afterUnbind->routeCount());
+        self::assertSame($orders->id, $afterUnbind->routes[0]->destinationId);
+
+        $this->broker->deleteRoutingSource('/', 'events');
+        self::assertNull($this->routingSources->findByName($this->virtualHostId, 'events'));
+        self::assertSame(0, $this->bindings->countBySource($this->virtualHostId, 'events'));
     }
 
     private function createDelivery(Destination $destination, string $payload): void

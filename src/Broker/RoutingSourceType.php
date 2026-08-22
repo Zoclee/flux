@@ -7,4 +7,5 @@ namespace Flux\Broker;
 enum RoutingSourceType: string
 {
     case Direct = 'direct';
+    case Fanout = 'fanout';
 }

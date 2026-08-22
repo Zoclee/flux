@@ -144,6 +144,50 @@ final class AmqpTopologyTest extends TestCase
         }
     }
 
+    public function testFanoutExchangeDeclareAndCompatibleRedeclare(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'fanout', durable: true))));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'fanout', durable: true))));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        $source = (new RoutingSourceRepository($this->connection))->findByName($this->virtualHostId, 'events');
+        self::assertNotNull($source);
+        self::assertSame('fanout', $source->type->value);
+        self::assertTrue($source->durable);
+    }
+
+    public function testIncompatibleDirectFanoutRedeclarationClosesChannel(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'direct'))));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'fanout'))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testDeniedQueueDeclareClosesChannelWithAccessRefused(): void
     {
         (new UserRepository($this->connection))->setPermissions('guest', '/', '^allowed$', '.*', '.*');

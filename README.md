@@ -10,7 +10,9 @@ Flux is currently at an MVP release-candidate stopping point. The first supporte
 - `flux` CLI migrations and administrative diagnostics
 - AMQP 0-9-1 connection/channel handshake
 - queue declare/delete/purge
+- default exchange
 - direct exchange declare/delete
+- fanout exchange declare/delete
 - queue bind/unbind
 - `basic.publish`
 - `basic.consume`
@@ -32,7 +34,7 @@ Flux is currently at an MVP release-candidate stopping point. The first supporte
 
 - no clustering or replication
 - no MQTT or Kafka adapters yet
-- no topic, fanout, or headers exchanges
+- no topic or headers exchanges
 - no AMQP transactions
 - no mandatory returns or alternate exchanges
 - no management UI or HTTP health endpoints

@@ -19,6 +19,7 @@ use Flux\Broker\ReleaseRequest;
 use Flux\Broker\ReserveRequest;
 use Flux\Broker\ResourceLimitException;
 use Flux\Broker\ResourceLimits;
+use Flux\Broker\RoutingSourceType;
 use Flux\Broker\TopologyException;
 use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
@@ -580,7 +581,8 @@ final class AmqpConnection
             throw new TopologyException('The default AMQP exchange is implicit.', TopologyException::PRECONDITION_FAILED);
         }
 
-        if ($type !== 'direct') {
+        $sourceType = RoutingSourceType::tryFrom($type);
+        if ($sourceType === null || !in_array($sourceType, [RoutingSourceType::Direct, RoutingSourceType::Fanout], true)) {
             throw new TopologyException(sprintf('Exchange type "%s" is not supported.', $type), TopologyException::NOT_IMPLEMENTED);
         }
 
@@ -592,7 +594,22 @@ final class AmqpConnection
             return;
         }
 
-        $this->broker()->declareDirectRoutingSource($this->openedVirtualHost(), $exchange, $durable, $autoDelete, $passive);
+        match ($sourceType) {
+            RoutingSourceType::Direct => $this->broker()->declareDirectRoutingSource(
+                $this->openedVirtualHost(),
+                $exchange,
+                $durable,
+                $autoDelete,
+                $passive
+            ),
+            RoutingSourceType::Fanout => $this->broker()->declareFanoutRoutingSource(
+                $this->openedVirtualHost(),
+                $exchange,
+                $durable,
+                $autoDelete,
+                $passive
+            ),
+        };
 
         if (!$noWait) {
             $this->writeFrame(Frame::methodFrame($frame->channel, 40, 11));

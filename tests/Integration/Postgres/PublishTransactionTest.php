@@ -8,6 +8,7 @@ use Flux\Broker\DeliveryState;
 use Flux\Broker\Destination;
 use Flux\Broker\ResourceLimitException;
 use Flux\Broker\ResourceLimits;
+use Flux\Broker\RoutingSourceType;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\DeliveryRepository;
@@ -263,6 +264,33 @@ final class PublishTransactionTest extends TestCase
 
         $result = $this->publisher->publish($this->defaultVirtualHostId, 'orders', 'order.created', 'payload');
 
+        self::assertSame(2, $result->routeCount());
+        self::assertSame(2, $result->deliveryCount());
+        self::assertEqualsCanonicalizing(
+            [$destinationA->id, $destinationB->id],
+            array_map(static fn ($route): int => $route->destinationId, $result->routes)
+        );
+    }
+
+    public function testFanoutIgnoresRoutingKeyAndRoutesEveryBoundDestinationOnce(): void
+    {
+        $destinationA = $this->bindDestination('events', 'created', 'events-a');
+        $destinationB = $this->bindDestination('events', 'updated', 'events-b');
+        $this->bindDestination('events.other', 'ignored', 'events-c');
+        $this->subscriptions->create($destinationA->id, 'worker-a');
+        $this->subscriptions->create($destinationB->id, 'worker-b');
+        $this->bindings->create($this->defaultVirtualHostId, 'events', $destinationA->id, 'duplicate-key');
+
+        $result = $this->publisher->publish(
+            $this->defaultVirtualHostId,
+            'events',
+            'not-used',
+            'payload',
+            persistUnrouted: false,
+            sourceType: RoutingSourceType::Fanout
+        );
+
+        self::assertSame(1, $this->tableCount('messages'));
         self::assertSame(2, $result->routeCount());
         self::assertSame(2, $result->deliveryCount());
         self::assertEqualsCanonicalizing(

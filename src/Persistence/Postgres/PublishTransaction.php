@@ -8,6 +8,7 @@ use Flux\Broker\Binding;
 use Flux\Broker\PublishResult;
 use Flux\Broker\ResourceLimitException;
 use Flux\Broker\ResourceLimits;
+use Flux\Broker\RoutingSourceType;
 use PDO;
 
 final readonly class PublishTransaction
@@ -44,7 +45,8 @@ final readonly class PublishTransaction
         int $priority = 0,
         bool $persistent = true,
         ?string $messageId = null,
-        bool $persistUnrouted = true
+        bool $persistUnrouted = true,
+        RoutingSourceType $sourceType = RoutingSourceType::Direct
     ): PublishResult {
         return $this->connection->transaction(function () use (
             $virtualHostId,
@@ -57,9 +59,14 @@ final readonly class PublishTransaction
             $priority,
             $persistent,
             $messageId,
-            $persistUnrouted
+            $persistUnrouted,
+            $sourceType
         ): PublishResult {
-            $destinationIds = $this->uniqueDestinationIds($this->bindings->findForRoute($virtualHostId, $source, $routingKey));
+            $bindings = match ($sourceType) {
+                RoutingSourceType::Direct => $this->bindings->findForRoute($virtualHostId, $source, $routingKey),
+                RoutingSourceType::Fanout => $this->bindings->findForSource($virtualHostId, $source),
+            };
+            $destinationIds = $this->uniqueDestinationIds($bindings);
             if ($destinationIds === [] && !$persistUnrouted) {
                 return new PublishResult(null, [], []);
             }

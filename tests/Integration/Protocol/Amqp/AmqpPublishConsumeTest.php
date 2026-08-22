@@ -247,6 +247,90 @@ final class AmqpPublishConsumeTest extends TestCase
         }
     }
 
+    public function testFanoutPublishIgnoresRoutingKeyAndDeliversToEveryBoundQueue(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            foreach (['orders-a', 'orders-b', 'unbound'] as $queue) {
+                $this->sendMethod($client, 1, 50, 10, $this->queueDeclare($queue));
+                self::assertSame([50, 11], $this->readMethod($listener, $client));
+            }
+            $this->sendMethod($client, 1, 40, 10, $this->exchangeDeclare('events', 'fanout'));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('orders-a', 'events', 'created'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('orders-b', 'events', 'updated'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, 'events', 'ignored', 'fanout-body', mandatory: true);
+            $ack = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 80], $ack->method());
+            self::assertSame(1, $this->deliveryTagFromBasicAck($ack));
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(2, $this->tableCount('message_routes'));
+            self::assertSame(2, $this->tableCount('deliveries'));
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('orders-a', noAck: true));
+            self::assertSame([60, 71], $this->readMethod($listener, $client));
+            self::assertSame(Frame::TYPE_HEADER, $this->readFrame($listener, $client)->type);
+            self::assertSame('fanout-body', $this->readFrame($listener, $client)->payload);
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('orders-b', noAck: true));
+            self::assertSame([60, 71], $this->readMethod($listener, $client));
+            self::assertSame(Frame::TYPE_HEADER, $this->readFrame($listener, $client)->type);
+            self::assertSame('fanout-body', $this->readFrame($listener, $client)->payload);
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('unbound', noAck: true));
+            self::assertSame([60, 72], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testFanoutPublishResourceFailureRollsBackAndDoesNotConfirm(): void
+    {
+        [$listener, $client] = $this->startedListener(limits: new ResourceLimits(maxQueueDepth: 1));
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            foreach (['orders-a', 'orders-b'] as $queue) {
+                $this->sendMethod($client, 1, 50, 10, $this->queueDeclare($queue));
+                self::assertSame([50, 11], $this->readMethod($listener, $client));
+            }
+            $this->sendMethod($client, 1, 40, 10, $this->exchangeDeclare('events', 'fanout'));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('orders-a', 'events', 'a'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('orders-b', 'events', 'b'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, '', 'orders-b', 'already-full');
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(1, $this->tableCount('message_routes'));
+            self::assertSame(1, $this->tableCount('deliveries'));
+
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, 'events', 'ignored', 'blocked', mandatory: true);
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(506, $this->replyCode($close));
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(1, $this->tableCount('message_routes'));
+            self::assertSame(1, $this->tableCount('deliveries'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testUnroutableMandatoryPublishReturnsOriginalMessageAndThenConfirms(): void
     {
         [$listener, $client] = $this->startedListener();
@@ -1621,9 +1705,9 @@ final class AmqpPublishConsumeTest extends TestCase
         return pack('n', 0) . $this->shortString($queue) . chr($bits) . pack('N', 0);
     }
 
-    private function exchangeDeclare(string $exchange): string
+    private function exchangeDeclare(string $exchange, string $type = 'direct'): string
     {
-        return pack('n', 0) . $this->shortString($exchange) . $this->shortString('direct') . "\x02" . pack('N', 0);
+        return pack('n', 0) . $this->shortString($exchange) . $this->shortString($type) . "\x02" . pack('N', 0);
     }
 
     private function queueBind(string $queue, string $exchange, string $routingKey): string

@@ -39,7 +39,8 @@ final readonly class Broker
             throw VirtualHostNotFoundException::forName($request->virtualHost);
         }
 
-        if ($this->routingSources !== null && $this->routingSources->findByName($virtualHost->id, $request->source) === null) {
+        $routingSource = $this->routingSources?->findByName($virtualHost->id, $request->source);
+        if ($this->routingSources !== null && $routingSource === null) {
             throw new TopologyException(
                 sprintf('Routing source "%s" does not exist.', $request->source),
                 TopologyException::NOT_FOUND
@@ -57,7 +58,8 @@ final readonly class Broker
             $request->priority,
             $request->persistent,
             $request->messageId,
-            $request->persistUnrouted
+            $request->persistUnrouted,
+            $routingSource?->type ?? RoutingSourceType::Direct
         );
     }
 
@@ -265,6 +267,41 @@ final readonly class Broker
         bool $autoDelete,
         bool $passive = false
     ): RoutingSource {
+        return $this->declareRoutingSource(
+            $virtualHostName,
+            $name,
+            RoutingSourceType::Direct,
+            $durable,
+            $autoDelete,
+            $passive
+        );
+    }
+
+    public function declareFanoutRoutingSource(
+        string $virtualHostName,
+        string $name,
+        bool $durable,
+        bool $autoDelete,
+        bool $passive = false
+    ): RoutingSource {
+        return $this->declareRoutingSource(
+            $virtualHostName,
+            $name,
+            RoutingSourceType::Fanout,
+            $durable,
+            $autoDelete,
+            $passive
+        );
+    }
+
+    private function declareRoutingSource(
+        string $virtualHostName,
+        string $name,
+        RoutingSourceType $type,
+        bool $durable,
+        bool $autoDelete,
+        bool $passive = false
+    ): RoutingSource {
         if ($name === '') {
             throw new TopologyException(
                 'The default AMQP exchange is implicit and cannot be declared.',
@@ -290,7 +327,7 @@ final readonly class Broker
             return $routingSources->create(
                 $virtualHost->id,
                 $name,
-                RoutingSourceType::Direct,
+                $type,
                 $durable,
                 $autoDelete,
                 ['declared_by' => 'topology']
@@ -298,7 +335,7 @@ final readonly class Broker
         }
 
         if (
-            $source->type !== RoutingSourceType::Direct
+            $source->type !== $type
             || $source->durable !== $durable
             || $source->autoDelete !== $autoDelete
         ) {
