@@ -53,6 +53,16 @@ final class AmqpConnection
     private array $prefetchCounts = [];
 
     /**
+     * @var array<int, true>
+     */
+    private array $confirmChannels = [];
+
+    /**
+     * @var array<int, int>
+     */
+    private array $nextPublishSequenceTags = [];
+
+    /**
      * @var array<int, array{exchange: string, routing_key: string, mandatory: bool, immediate: bool}>
      */
     private array $pendingPublishMethods = [];
@@ -203,6 +213,8 @@ final class AmqpConnection
         $this->connections->remove($this->runtimeConnection->id);
         $this->channels = [];
         $this->prefetchCounts = [];
+        $this->confirmChannels = [];
+        $this->nextPublishSequenceTags = [];
         $this->pendingPublishMethods = [];
         $this->pendingPublishes = [];
         $this->nextDeliveryTags = [];
@@ -322,6 +334,7 @@ final class AmqpConnection
                 [50, 10] => $this->handleQueueDeclare($frame),
                 [40, 10] => $this->handleExchangeDeclare($frame),
                 [50, 20] => $this->handleQueueBind($frame),
+                [85, 10] => $this->handleConfirmSelect($frame),
                 [60, 10] => $this->handleBasicQos($frame),
                 [60, 40] => $this->handleBasicPublish($frame),
                 [60, 20] => $this->handleBasicConsume($frame),
@@ -370,6 +383,20 @@ final class AmqpConnection
         $this->prefetchCounts[$frame->channel] = $prefetchCount;
         $this->writeFrame(Frame::methodFrame($frame->channel, 60, 11));
         $this->deliverToConsumers();
+    }
+
+    private function handleConfirmSelect(Frame $frame): void
+    {
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $bits = $reader->readOctet();
+        $reader->assertComplete();
+
+        $this->confirmChannels[$frame->channel] = true;
+        $this->nextPublishSequenceTags[$frame->channel] ??= 1;
+
+        if (($bits & 0b00000001) === 0) {
+            $this->writeFrame(Frame::methodFrame($frame->channel, 85, 11));
+        }
     }
 
     private function handleQueueDeclare(Frame $frame): void
@@ -701,13 +728,14 @@ final class AmqpConnection
                     $properties['content_type'] ?? null,
                     $properties['content_encoding'] ?? null,
                     $properties['priority'] ?? 0,
-                    ($properties['delivery_mode'] ?? 2) === 2,
-                    $messageId
-                );
-            } catch (TopologyException $exception) {
-                $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
-            } catch (Throwable $exception) {
-                $this->sendChannelError($channel, 541, $exception->getMessage(), 60, 40);
+                ($properties['delivery_mode'] ?? 2) === 2,
+                $messageId
+            );
+            $this->sendPublishConfirm($channel);
+        } catch (TopologyException $exception) {
+            $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
+        } catch (Throwable $exception) {
+            $this->sendChannelError($channel, 541, $exception->getMessage(), 60, 40);
             }
             return;
         }
@@ -725,6 +753,7 @@ final class AmqpConnection
                 ($properties['delivery_mode'] ?? 2) === 2,
                 $messageId
             ));
+            $this->sendPublishConfirm($channel);
         } catch (TopologyException $exception) {
             $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
         } catch (Throwable $exception) {
@@ -885,11 +914,24 @@ final class AmqpConnection
         return pack('nn', 60, 0) . $this->packLongLong(strlen($message->payload)) . pack('n', $flags) . $values;
     }
 
+    private function sendPublishConfirm(int $channel): void
+    {
+        if (!isset($this->confirmChannels[$channel])) {
+            return;
+        }
+
+        $deliveryTag = $this->nextPublishSequenceTags[$channel] ?? 1;
+        $this->nextPublishSequenceTags[$channel] = $deliveryTag + 1;
+        $this->writeFrame(Frame::methodFrame($channel, 60, 80, $this->packLongLong($deliveryTag) . "\x00"));
+    }
+
     private function closeChannel(int $channel): void
     {
         unset(
             $this->channels[$channel],
             $this->prefetchCounts[$channel],
+            $this->confirmChannels[$channel],
+            $this->nextPublishSequenceTags[$channel],
             $this->pendingPublishMethods[$channel],
             $this->pendingPublishes[$channel]
         );

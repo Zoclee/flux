@@ -543,6 +543,212 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame([DeliveryState::Pending, DeliveryState::Pending], $this->deliveryStates('orders'));
     }
 
+    public function testConfirmSelectReturnsSelectOk(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testConfirmSelectNoWaitDoesNotSendSelectOkButPublishesAreConfirmed(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(true));
+            $this->publishBody($listener, $client, 1, '', 'orders', 'confirmed');
+            $ack = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([60, 80], $ack->method());
+            self::assertSame(1, $this->deliveryTagFromBasicAck($ack));
+            self::assertFalse($this->multipleFromBasicAck($ack));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testPublishAfterConfirmModeReceivesIndividualBasicAck(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, '', 'orders', 'confirmed');
+            $ack = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([60, 80], $ack->method());
+            self::assertSame(1, $this->deliveryTagFromBasicAck($ack));
+            self::assertFalse($this->multipleFromBasicAck($ack));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testSubsequentConfirmPublishesIncrementDeliveryTags(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, '', 'orders', 'first');
+            self::assertSame(1, $this->deliveryTagFromBasicAck($this->readMethodFrame($listener, $client)));
+            $this->publishBody($listener, $client, 1, '', 'orders', 'second');
+            self::assertSame(2, $this->deliveryTagFromBasicAck($this->readMethodFrame($listener, $client)));
+            $this->publishBody($listener, $client, 1, '', 'orders', 'third');
+            self::assertSame(3, $this->deliveryTagFromBasicAck($this->readMethodFrame($listener, $client)));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testSeparateChannelsMaintainIndependentConfirmCounters(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 2, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, '', 'orders', 'first');
+            $ackOne = $this->readMethodFrame($listener, $client);
+            $this->publishBody($listener, $client, 2, '', 'orders', 'second');
+            $ackTwo = $this->readMethodFrame($listener, $client);
+
+            self::assertSame(1, $ackOne->channel);
+            self::assertSame(1, $this->deliveryTagFromBasicAck($ackOne));
+            self::assertSame(2, $ackTwo->channel);
+            self::assertSame(1, $this->deliveryTagFromBasicAck($ackTwo));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testNonConfirmChannelReceivesNoPublisherConfirm(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->publishBody($listener, $client, 1, '', 'orders', 'unconfirmed');
+
+            $this->assertNoFrame($listener, $client);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testSplitBinaryPublishIsConfirmedOnlyAfterCompletePersistence(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+        $payload = "first\x00second\xff";
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('', 'orders'));
+            fwrite($client, $codec->encode($this->contentHeader(1, strlen($payload), 'application/octet-stream', 5)));
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, substr($payload, 0, 5))));
+            $listener->tick();
+            $this->assertNoFrame($listener, $client);
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, substr($payload, 5))));
+            $ack = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([60, 80], $ack->method());
+            self::assertSame(1, $this->deliveryTagFromBasicAck($ack));
+            self::assertSame($payload, $this->payloadForSingleMessage('orders'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testFailedConfirmPublishIsNotPositivelyAcknowledged(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+            $this->publishBody($listener, $client, 1, 'missing.exchange', 'orders', 'failed');
+            $frame = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $frame->method());
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testChannelCloseClearsConfirmStateAndSequenceTracking(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+            $this->publishBody($listener, $client, 1, '', 'orders', 'first');
+            self::assertSame(1, $this->deliveryTagFromBasicAck($this->readMethodFrame($listener, $client)));
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 20, 40, pack('n', 200) . $this->shortString('Goodbye') . pack('nn', 0, 0))));
+            self::assertSame([20, 41], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            $this->publishBody($listener, $client, 1, '', 'orders', 'second');
+            $this->assertNoFrame($listener, $client);
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+            $this->publishBody($listener, $client, 1, '', 'orders', 'third');
+            self::assertSame(1, $this->deliveryTagFromBasicAck($this->readMethodFrame($listener, $client)));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     /**
      * @return array{0: AmqpListener, 1: resource}
      */
@@ -632,6 +838,29 @@ final class AmqpPublishConsumeTest extends TestCase
         return $this->packLongLong($deliveryTag) . chr($bits);
     }
 
+    private function confirmSelect(bool $noWait): string
+    {
+        return chr($noWait ? 1 : 0);
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function publishBody(
+        AmqpListener $listener,
+        mixed $client,
+        int $channel,
+        string $exchange,
+        string $routingKey,
+        string $body
+    ): void {
+        $codec = new FrameCodec();
+        $this->sendMethod($client, $channel, 60, 40, $this->basicPublish($exchange, $routingKey));
+        fwrite($client, $codec->encode($this->contentHeader($channel, strlen($body))));
+        fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, $channel, $body)));
+        $listener->tick();
+    }
+
     /**
      * @param resource $client
      * @param list<string> $bodies
@@ -715,6 +944,21 @@ final class AmqpPublishConsumeTest extends TestCase
         $reader->readShortString();
 
         return $reader->readLongLong();
+    }
+
+    private function deliveryTagFromBasicAck(Frame $frame): int
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+
+        return $reader->readLongLong();
+    }
+
+    private function multipleFromBasicAck(Frame $frame): bool
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readLongLong();
+
+        return ($reader->readOctet() & 0b00000001) !== 0;
     }
 
     private function bodySizeFromHeader(Frame $frame): int
@@ -801,6 +1045,17 @@ final class AmqpPublishConsumeTest extends TestCase
             static fn (\Flux\Broker\Delivery $delivery): DeliveryState => $delivery->state,
             $deliveries
         );
+    }
+
+    private function payloadForSingleMessage(string $queue): string
+    {
+        $delivery = $this->singleDelivery($queue);
+        $route = (new MessageRouteRepository($this->connection))->findById($delivery->messageRouteId);
+        self::assertNotNull($route);
+        $message = (new MessageRepository($this->connection))->findById($route->messageId);
+        self::assertNotNull($message);
+
+        return $message->payload;
     }
 
     private function broker(): Broker
