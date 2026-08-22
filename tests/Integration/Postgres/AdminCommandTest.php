@@ -107,7 +107,13 @@ final class AdminCommandTest extends TestCase
 
     public function testQueueShowDisplaysExistingQueueAndRejectsUnknownQueue(): void
     {
-        $queue = $this->destinations->create($this->defaultVirtualHostId, 'orders', 'queue', durable: true);
+        $queue = $this->destinations->create($this->defaultVirtualHostId, 'orders', 'queue', durable: true, metadata: [
+            'retry_policy' => [
+                'max_attempts' => 3,
+                'retry_delay_seconds' => 15,
+                'dead_letter_destination' => 'orders.dlq',
+            ],
+        ]);
         $this->bindings->create($this->defaultVirtualHostId, 'orders', $queue->id, 'order.created');
         $this->subscriptions->create($queue->id, 'workers');
         $message = $this->messages->create('payload');
@@ -121,6 +127,8 @@ final class AdminCommandTest extends TestCase
         self::assertStringContainsString('Queue: orders', $output);
         self::assertStringContainsString('Virtual Host:   /', $output);
         self::assertStringContainsString('Durable:        yes', $output);
+        self::assertStringContainsString('Retry Policy:   max_attempts=3, retry_delay_seconds=15', $output);
+        self::assertStringContainsString('Dead Letter:    orders.dlq', $output);
         self::assertStringContainsString('Bindings:       1', $output);
         self::assertStringContainsString('Subscriptions:  1', $output);
         self::assertStringContainsString('Routes:         1', $output);

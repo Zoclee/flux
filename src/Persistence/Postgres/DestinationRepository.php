@@ -37,6 +37,21 @@ SQL);
         return is_array($row) ? $this->mapRow($row) : null;
     }
 
+    public function findById(int $id): ?Destination
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT id, virtual_host_id, name, type, durable, auto_delete, metadata, created_at, updated_at
+FROM destinations
+WHERE id = :id
+SQL);
+        $statement->bindValue('id', $id, PDO::PARAM_INT);
+        $statement->execute();
+
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        return is_array($row) ? $this->mapRow($row) : null;
+    }
+
     /**
      * @param array<string, mixed> $metadata
      */

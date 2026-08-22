@@ -13,7 +13,9 @@ use Flux\Broker\DestinationNotFoundException;
 use Flux\Broker\RejectRequest;
 use Flux\Broker\ReleaseRequest;
 use Flux\Broker\ReserveRequest;
+use Flux\Broker\RetryPolicy;
 use Flux\Broker\SubscriptionNotFoundException;
+use Flux\Broker\TopologyException;
 use Flux\Broker\VirtualHostNotFoundException;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\DeliveryRepository;
@@ -275,12 +277,187 @@ SQL);
         }
     }
 
+    public function testRetryPolicyReleasesDeliveryWithFutureAvailabilityBeforeMaxAttempts(): void
+    {
+        [$destination] = $this->createDestinationAndSubscription('orders', 'worker-a', [
+            'retry_policy' => [
+                'max_attempts' => 3,
+                'retry_delay_seconds' => 60,
+                'dead_letter_destination' => 'orders.dlq',
+            ],
+        ]);
+        $this->destinations->create($this->defaultVirtualHostId, 'orders.dlq', 'queue');
+        $this->createPendingDelivery($destination, 'retry');
+        $reserved = $this->broker->reserve(new ReserveRequest('/', 'orders', 'worker-a', 'consumer-a'));
+        self::assertNotNull($reserved);
+        $before = new DateTimeImmutable();
+
+        $failed = $this->broker->reject(new RejectRequest($reserved->id));
+
+        self::assertSame(DeliveryState::Pending, $failed->state);
+        self::assertSame(1, $failed->attempts);
+        self::assertGreaterThan($before->getTimestamp(), $failed->availableAt->getTimestamp());
+        self::assertNull($this->broker->reserve(new ReserveRequest('/', 'orders', 'worker-a', 'consumer-b')));
+    }
+
+    public function testRetriedDeliveryCanBeReservedAgainAndAttemptsContinueIncrementing(): void
+    {
+        [$destination] = $this->createDestinationAndSubscription('orders', 'worker-a', [
+            'retry_policy' => [
+                'max_attempts' => 3,
+                'retry_delay_seconds' => 0,
+                'dead_letter_destination' => 'orders.dlq',
+            ],
+        ]);
+        $this->destinations->create($this->defaultVirtualHostId, 'orders.dlq', 'queue');
+        $this->createPendingDelivery($destination, 'retry');
+        $first = $this->broker->reserve(new ReserveRequest('/', 'orders', 'worker-a', 'consumer-a'));
+        self::assertNotNull($first);
+        $this->broker->reject(new RejectRequest($first->id));
+
+        $second = $this->broker->reserve(new ReserveRequest('/', 'orders', 'worker-a', 'consumer-b'));
+
+        self::assertNotNull($second);
+        self::assertSame($first->id, $second->id);
+        self::assertSame(2, $second->attempts);
+    }
+
+    public function testMaxAttemptsRoutesMessageToDeadLetterDestinationWithoutDuplicatingPayload(): void
+    {
+        [$destination] = $this->createDestinationAndSubscription('orders', 'worker-a', [
+            'retry_policy' => [
+                'max_attempts' => 1,
+                'retry_delay_seconds' => 0,
+                'dead_letter_destination' => 'orders.dlq',
+            ],
+        ]);
+        $dlq = $this->destinations->create($this->defaultVirtualHostId, 'orders.dlq', 'queue');
+        $dlqSubscription = $this->subscriptions->create($dlq->id, 'dlq-workers');
+        $message = $this->messages->create('dead-letter-payload');
+        $route = $this->routes->create($message->id, $destination->id);
+        $this->deliveries->create($route->id, $this->subscriptions->findByName($destination->id, 'worker-a')?->id ?? 0);
+        $reserved = $this->broker->reserve(new ReserveRequest('/', 'orders', 'worker-a', 'consumer-a'));
+        self::assertNotNull($reserved);
+
+        $failed = $this->broker->reject(new RejectRequest($reserved->id));
+
+        self::assertSame(DeliveryState::Rejected, $failed->state);
+        self::assertSame(1, $this->messages->countAll());
+        $routes = $this->routes->allByMessage($message->id);
+        self::assertCount(2, $routes);
+        $deadLetterRoutes = array_values(array_filter($routes, static fn ($route): bool => $route->destinationId === $dlq->id));
+        self::assertCount(1, $deadLetterRoutes);
+        $dlqDeliveries = $this->deliveries->allBySubscription($dlqSubscription->id);
+        self::assertCount(1, $dlqDeliveries);
+        self::assertSame($deadLetterRoutes[0]->id, $dlqDeliveries[0]->messageRouteId);
+        self::assertSame(DeliveryState::Pending, $dlqDeliveries[0]->state);
+        self::assertSame('dead-letter-payload', $this->messages->findById($message->id)?->payload);
+    }
+
+    public function testMissingDeadLetterDestinationFailsWithoutMutatingOriginalDelivery(): void
+    {
+        [$destination] = $this->createDestinationAndSubscription('orders', 'worker-a', [
+            'retry_policy' => [
+                'max_attempts' => 1,
+                'retry_delay_seconds' => 0,
+                'dead_letter_destination' => 'missing.dlq',
+            ],
+        ]);
+        $deliveryId = $this->createPendingDelivery($destination, 'missing-dlq');
+        $reserved = $this->broker->reserve(new ReserveRequest('/', 'orders', 'worker-a', 'consumer-a'));
+        self::assertNotNull($reserved);
+
+        try {
+            $this->broker->reject(new RejectRequest($reserved->id));
+            self::fail('Expected missing dead-letter destination to fail.');
+        } catch (TopologyException $exception) {
+            self::assertStringContainsString('Dead-letter destination "missing.dlq" does not exist.', $exception->getMessage());
+        }
+
+        $delivery = $this->deliveries->findById($deliveryId);
+        self::assertNotNull($delivery);
+        self::assertSame(DeliveryState::Reserved, $delivery->state);
+        self::assertSame(1, $delivery->attempts);
+        self::assertSame(1, $this->routes->countByDestination($destination->id));
+    }
+
+    public function testDeadLetterTransactionRollbackPreservesOriginalStateOnPersistenceFailure(): void
+    {
+        [$destination] = $this->createDestinationAndSubscription('orders', 'worker-a');
+        $deliveryId = $this->createPendingDelivery($destination, 'rollback');
+        $reserved = $this->broker->reserve(new ReserveRequest('/', 'orders', 'worker-a', 'consumer-a'));
+        self::assertNotNull($reserved);
+
+        try {
+            $this->deliveries->fail($reserved->id, new RetryPolicy(1, 0, 'missing'), 999999);
+            self::fail('Expected invalid dead-letter destination persistence failure.');
+        } catch (\RuntimeException) {
+        }
+
+        $delivery = $this->deliveries->findById($deliveryId);
+        self::assertNotNull($delivery);
+        self::assertSame(DeliveryState::Reserved, $delivery->state);
+        self::assertSame(1, $this->routes->countByDestination($destination->id));
+        self::assertSame(1, $this->messages->countAll());
+    }
+
+    public function testBinaryPayloadSurvivesDeadLetterRouting(): void
+    {
+        [$destination] = $this->createDestinationAndSubscription('binary', 'worker-a', [
+            'retry_policy' => [
+                'max_attempts' => 1,
+                'retry_delay_seconds' => 0,
+                'dead_letter_destination' => 'binary.dlq',
+            ],
+        ]);
+        $dlq = $this->destinations->create($this->defaultVirtualHostId, 'binary.dlq', 'queue');
+        $dlqSubscription = $this->subscriptions->create($dlq->id, 'dlq-workers');
+        $payload = "abc\x00def\xff";
+        $message = $this->messages->create($payload);
+        $route = $this->routes->create($message->id, $destination->id);
+        $this->deliveries->create($route->id, $this->subscriptions->findByName($destination->id, 'worker-a')?->id ?? 0);
+        $reserved = $this->broker->reserve(new ReserveRequest('/', 'binary', 'worker-a', 'consumer-a'));
+        self::assertNotNull($reserved);
+
+        $this->broker->reject(new RejectRequest($reserved->id));
+
+        $dlqDelivery = $this->deliveries->allBySubscription($dlqSubscription->id)[0] ?? null;
+        self::assertNotNull($dlqDelivery);
+        $dlqRoute = $this->routes->findById($dlqDelivery->messageRouteId);
+        self::assertNotNull($dlqRoute);
+        self::assertSame($message->id, $dlqRoute->messageId);
+        self::assertSame($payload, $this->messages->findById($dlqRoute->messageId)?->payload);
+    }
+
+    public function testDeadLetterDestinationCreatesDeliveriesForAllSubscriptions(): void
+    {
+        [$destination] = $this->createDestinationAndSubscription('orders', 'worker-a', [
+            'retry_policy' => [
+                'max_attempts' => 1,
+                'retry_delay_seconds' => 0,
+                'dead_letter_destination' => 'orders.dlq',
+            ],
+        ]);
+        $dlq = $this->destinations->create($this->defaultVirtualHostId, 'orders.dlq', 'queue');
+        $this->subscriptions->create($dlq->id, 'dlq-a');
+        $this->subscriptions->create($dlq->id, 'dlq-b');
+        $this->createPendingDelivery($destination, 'multi-dlq');
+        $reserved = $this->broker->reserve(new ReserveRequest('/', 'orders', 'worker-a', 'consumer-a'));
+        self::assertNotNull($reserved);
+
+        $this->broker->reject(new RejectRequest($reserved->id));
+
+        self::assertCount(1, $this->deliveries->allBySubscription($this->subscriptions->findByName($dlq->id, 'dlq-a')?->id ?? 0));
+        self::assertCount(1, $this->deliveries->allBySubscription($this->subscriptions->findByName($dlq->id, 'dlq-b')?->id ?? 0));
+    }
+
     /**
      * @return array{0: Destination, 1: int}
+     * @param array<string, mixed> $metadata
      */
-    private function createDestinationAndSubscription(string $destinationName, string $subscriptionName): array
+    private function createDestinationAndSubscription(string $destinationName, string $subscriptionName, array $metadata = []): array
     {
-        $destination = $this->destinations->create($this->defaultVirtualHostId, $destinationName, 'queue');
+        $destination = $this->destinations->create($this->defaultVirtualHostId, $destinationName, 'queue', metadata: $metadata);
         $subscription = $this->subscriptions->create($destination->id, $subscriptionName);
 
         return [$destination, $subscription->id];

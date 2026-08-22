@@ -7,6 +7,7 @@ namespace Flux\Persistence\Postgres;
 use DateTimeImmutable;
 use Flux\Broker\Delivery;
 use Flux\Broker\DeliveryState;
+use Flux\Broker\RetryPolicy;
 use PDO;
 use RuntimeException;
 
@@ -205,6 +206,36 @@ updated_at = CURRENT_TIMESTAMP
 SQL);
     }
 
+    public function fail(int $id, ?RetryPolicy $policy = null, ?int $deadLetterDestinationId = null): Delivery
+    {
+        if ($policy === null) {
+            return $this->reject($id);
+        }
+
+        return $this->connection->transaction(function (PDO $pdo) use ($id, $policy, $deadLetterDestinationId): Delivery {
+            $delivery = $this->selectForUpdate($pdo, $id);
+
+            if ($delivery->state !== DeliveryState::Reserved) {
+                $this->throwInvalidTransition($id, DeliveryState::Rejected);
+            }
+
+            if ($delivery->attempts < $policy->maxAttempts) {
+                return $this->releaseWithPdo(
+                    $pdo,
+                    $id,
+                    (new DateTimeImmutable())->modify(sprintf('+%d seconds', $policy->retryDelaySeconds))
+                );
+            }
+
+            if ($deadLetterDestinationId !== null) {
+                $route = $this->deadLetterRoute($pdo, $delivery->messageRouteId, $deadLetterDestinationId);
+                $this->createDeadLetterDeliveries($pdo, $route['id'], $deadLetterDestinationId);
+            }
+
+            return $this->rejectWithPdo($pdo, $id);
+        });
+    }
+
     public function release(int $id, ?DateTimeImmutable $availableAt = null): Delivery
     {
         if ($availableAt === null) {
@@ -283,6 +314,126 @@ SQL, $assignments, self::COLUMNS));
         }
 
         throw DeliveryStateException::invalidTransition($id, $delivery->state->value, $to->value);
+    }
+
+    private function selectForUpdate(PDO $pdo, int $id): Delivery
+    {
+        $statement = $pdo->prepare(sprintf(<<<'SQL'
+SELECT %s
+FROM deliveries
+WHERE id = :id
+FOR UPDATE
+SQL, self::COLUMNS));
+        $statement->bindValue('id', $id, PDO::PARAM_INT);
+        $statement->execute();
+
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        if (!is_array($row)) {
+            throw DeliveryStateException::notFound($id);
+        }
+
+        return $this->mapRow($row);
+    }
+
+    private function releaseWithPdo(PDO $pdo, int $id, DateTimeImmutable $availableAt): Delivery
+    {
+        $statement = $pdo->prepare(sprintf(<<<'SQL'
+UPDATE deliveries
+SET state = 'pending',
+    consumer_id = NULL,
+    delivery_tag = NULL,
+    reserved_at = NULL,
+    available_at = :available_at,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :id
+  AND state = 'reserved'
+RETURNING %s
+SQL, self::COLUMNS));
+        $statement->bindValue('id', $id, PDO::PARAM_INT);
+        $statement->bindValue('available_at', $this->formatTimestamp($availableAt));
+        $statement->execute();
+
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        if (!is_array($row)) {
+            $this->throwInvalidTransition($id, DeliveryState::Pending);
+        }
+
+        return $this->mapRow($row);
+    }
+
+    private function rejectWithPdo(PDO $pdo, int $id): Delivery
+    {
+        $statement = $pdo->prepare(sprintf(<<<'SQL'
+UPDATE deliveries
+SET state = 'rejected',
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :id
+  AND state = 'reserved'
+RETURNING %s
+SQL, self::COLUMNS));
+        $statement->bindValue('id', $id, PDO::PARAM_INT);
+        $statement->execute();
+
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        if (!is_array($row)) {
+            $this->throwInvalidTransition($id, DeliveryState::Rejected);
+        }
+
+        return $this->mapRow($row);
+    }
+
+    /**
+     * @return array{id: int, message_id: int}
+     */
+    private function deadLetterRoute(PDO $pdo, int $messageRouteId, int $deadLetterDestinationId): array
+    {
+        $source = $pdo->prepare(<<<'SQL'
+SELECT message_id
+FROM message_routes
+WHERE id = :id
+SQL);
+        $source->bindValue('id', $messageRouteId, PDO::PARAM_INT);
+        $source->execute();
+
+        $messageId = $source->fetchColumn();
+        if ($messageId === false) {
+            throw new RuntimeException(sprintf('Message route %d does not exist.', $messageRouteId));
+        }
+
+        $insert = $pdo->prepare(<<<'SQL'
+INSERT INTO message_routes (message_id, destination_id)
+VALUES (:message_id, :destination_id)
+ON CONFLICT (message_id, destination_id) DO UPDATE
+SET destination_id = EXCLUDED.destination_id
+RETURNING id, message_id
+SQL);
+        $insert->bindValue('message_id', (int) $messageId, PDO::PARAM_INT);
+        $insert->bindValue('destination_id', $deadLetterDestinationId, PDO::PARAM_INT);
+        $insert->execute();
+
+        $row = $insert->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($row)) {
+            throw new RuntimeException('PostgreSQL did not return the dead-letter message route.');
+        }
+
+        return ['id' => (int) $row['id'], 'message_id' => (int) $row['message_id']];
+    }
+
+    private function createDeadLetterDeliveries(PDO $pdo, int $messageRouteId, int $deadLetterDestinationId): void
+    {
+        $statement = $pdo->prepare(<<<'SQL'
+INSERT INTO deliveries (message_route_id, subscription_id, destination_id)
+SELECT :message_route_id, subscriptions.id, :destination_id
+FROM subscriptions
+WHERE subscriptions.destination_id = :destination_id
+ON CONFLICT (message_route_id, subscription_id) DO NOTHING
+SQL);
+        $statement->bindValue('message_route_id', $messageRouteId, PDO::PARAM_INT);
+        $statement->bindValue('destination_id', $deadLetterDestinationId, PDO::PARAM_INT);
+        $statement->execute();
     }
 
     /**

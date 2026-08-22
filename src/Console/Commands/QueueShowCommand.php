@@ -6,6 +6,7 @@ namespace Flux\Console\Commands;
 
 use Flux\Broker\DestinationType;
 use Flux\Broker\DeliveryState;
+use Flux\Broker\RetryPolicy;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\DeliveryRepository;
 use Flux\Persistence\Postgres\DestinationRepository;
@@ -46,6 +47,7 @@ final readonly class QueueShowCommand
                 return 1;
             }
 
+            $retryPolicy = RetryPolicy::fromDestinationMetadata($queue->metadata);
             $bindingCount = (new BindingRepository($connection))->countByDestination($queue->id);
             $subscriptionCount = (new SubscriptionRepository($connection))->countByDestination($queue->id);
             $routeCount = (new MessageRouteRepository($connection))->countByDestination($queue->id);
@@ -62,6 +64,12 @@ final readonly class QueueShowCommand
         $this->write($output, sprintf("Type:           %s\n", $queue->type->value));
         $this->write($output, sprintf("Durable:        %s\n", self::yesNo($queue->durable)));
         $this->write($output, sprintf("Auto Delete:    %s\n", self::yesNo($queue->autoDelete)));
+        $this->write($output, sprintf("Retry Policy:   %s\n", $retryPolicy === null ? 'none' : sprintf(
+            'max_attempts=%d, retry_delay_seconds=%d',
+            $retryPolicy->maxAttempts,
+            $retryPolicy->retryDelaySeconds
+        )));
+        $this->write($output, sprintf("Dead Letter:    %s\n", $retryPolicy?->deadLetterDestination ?? 'none'));
         $this->write($output, sprintf("Created:        %s\n", $queue->createdAt->format('Y-m-d H:i:sP')));
         $this->write($output, sprintf("Updated:        %s\n\n", $queue->updatedAt->format('Y-m-d H:i:sP')));
         $this->write($output, sprintf("Bindings:       %d\n", $bindingCount));

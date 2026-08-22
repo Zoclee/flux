@@ -89,7 +89,35 @@ final readonly class Broker
 
     public function reject(RejectRequest $request): Delivery
     {
-        return $this->deliveries->reject($request->deliveryId);
+        $delivery = $this->deliveries->findById($request->deliveryId);
+        if ($delivery === null) {
+            return $this->deliveries->reject($request->deliveryId);
+        }
+
+        $destination = $this->destinations->findById($delivery->destinationId);
+        if ($destination === null) {
+            return $this->deliveries->reject($request->deliveryId);
+        }
+
+        $policy = RetryPolicy::fromDestinationMetadata($destination->metadata);
+        if ($policy === null) {
+            return $this->deliveries->reject($request->deliveryId);
+        }
+
+        $deadLetterDestinationId = null;
+        if ($policy->deadLetterDestination !== null) {
+            $deadLetterDestination = $this->destinations->findByName($destination->virtualHostId, $policy->deadLetterDestination);
+            if ($deadLetterDestination === null || $deadLetterDestination->type !== DestinationType::Queue) {
+                throw new TopologyException(
+                    sprintf('Dead-letter destination "%s" does not exist.', $policy->deadLetterDestination),
+                    TopologyException::NOT_FOUND
+                );
+            }
+
+            $deadLetterDestinationId = $deadLetterDestination->id;
+        }
+
+        return $this->deliveries->fail($request->deliveryId, $policy, $deadLetterDestinationId);
     }
 
     public function release(ReleaseRequest $request): Delivery
