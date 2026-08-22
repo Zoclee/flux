@@ -154,6 +154,21 @@ SQL);
         return (int) $statement->fetchColumn();
     }
 
+    public function countReadyByDestination(int $destinationId): int
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT COUNT(*)
+FROM deliveries
+WHERE destination_id = :destination_id
+  AND state = 'pending'
+  AND available_at <= CURRENT_TIMESTAMP
+SQL);
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->execute();
+
+        return (int) $statement->fetchColumn();
+    }
+
     public function rejectOutstandingByDestination(int $destinationId): int
     {
         $statement = $this->connection->pdo()->prepare(<<<'SQL'

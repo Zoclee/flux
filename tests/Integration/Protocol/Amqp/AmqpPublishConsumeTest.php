@@ -118,6 +118,107 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame(7, $message->priority);
     }
 
+    public function testQueueDeclareOkReportsZeroMessagesForEmptyQueue(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            $declareOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 11], $declareOk->method());
+            self::assertSame(0, $this->queueDeclareMessageCount($declareOk));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testQueueDeclareOkReportsOneReadyMessageAfterPublish(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->publishBody($listener, $client, 1, '', 'orders', 'one');
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            $declareOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 11], $declareOk->method());
+            self::assertSame(1, $this->queueDeclareMessageCount($declareOk));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testQueueDeclareOkReportsSeveralReadyMessagesAfterPublishes(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two', 'three']);
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            $declareOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 11], $declareOk->method());
+            self::assertSame(3, $this->queueDeclareMessageCount($declareOk));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testQueueDeclareOkMessageCountDecreasesAfterBasicGetNoAck(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two']);
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('orders', noAck: true));
+            $getOk = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 71], $getOk->method());
+            $this->readFrame($listener, $client);
+            self::assertSame('one', $this->readFrame($listener, $client)->payload);
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            $declareOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 11], $declareOk->method());
+            self::assertSame(1, $this->queueDeclareMessageCount($declareOk));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testPassiveQueueDeclareOkReportsReadyMessageCount(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two']);
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders', passive: true));
+            $declareOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 11], $declareOk->method());
+            self::assertSame(2, $this->queueDeclareMessageCount($declareOk));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testTlsDefaultExchangePublishConsumeAndAckUsesSameBrokerFlow(): void
     {
         [$listener, $client] = $this->startedTlsListener();
@@ -1416,9 +1517,14 @@ final class AmqpPublishConsumeTest extends TestCase
         fwrite($client, (new FrameCodec())->encode(Frame::methodFrame($channel, $classId, $methodId, $arguments)));
     }
 
-    private function queueDeclare(string $queue): string
+    private function queueDeclare(string $queue, bool $passive = false): string
     {
-        return pack('n', 0) . $this->shortString($queue) . "\x02" . pack('N', 0);
+        $bits = 0b00000010;
+        if ($passive) {
+            $bits |= 0b00000001;
+        }
+
+        return pack('n', 0) . $this->shortString($queue) . chr($bits) . pack('N', 0);
     }
 
     private function exchangeDeclare(string $exchange): string
@@ -1637,6 +1743,14 @@ final class AmqpPublishConsumeTest extends TestCase
         $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
 
         return $reader->readLongLong();
+    }
+
+    private function queueDeclareMessageCount(Frame $frame): int
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readShortString();
+
+        return $reader->readLong();
     }
 
     private function multipleFromBasicAck(Frame $frame): bool

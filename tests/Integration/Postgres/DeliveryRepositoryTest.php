@@ -359,6 +359,27 @@ SQL);
         }
     }
 
+    public function testReadyCountIncludesOnlyPendingAvailableDeliveriesForDestination(): void
+    {
+        [$routeId, $subscriptionId, $destinationId] = $this->createRouteAndSubscription('ready-count');
+        $secondRouteId = $this->createRouteForExistingSubscriptionDestination($subscriptionId);
+        $thirdRouteId = $this->createRouteForExistingSubscriptionDestination($subscriptionId);
+        $futureRouteId = $this->createRouteForExistingSubscriptionDestination($subscriptionId);
+
+        $this->deliveries->create($routeId, $subscriptionId);
+        $reserved = $this->deliveries->create($secondRouteId, $subscriptionId);
+        $acknowledged = $this->deliveries->create($thirdRouteId, $subscriptionId);
+        $this->deliveries->create($futureRouteId, $subscriptionId, new DateTimeImmutable('2030-01-01T00:00:00+00:00'));
+
+        $reserved = $this->deliveries->reserveNext($subscriptionId, 'consumer-a');
+        self::assertNotNull($reserved);
+        $acknowledged = $this->deliveries->reserveNext($subscriptionId, 'consumer-b');
+        self::assertNotNull($acknowledged);
+        $this->deliveries->acknowledge($acknowledged->id);
+
+        self::assertSame(1, $this->deliveries->countReadyByDestination($destinationId));
+    }
+
     /**
      * @return array{0: int, 1: int, 2: int}
      */

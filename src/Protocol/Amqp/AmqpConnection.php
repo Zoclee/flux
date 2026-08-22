@@ -551,11 +551,12 @@ final class AmqpConnection
         $destination = $this->broker()->declareQueue($this->openedVirtualHost(), $queue, $durable, $autoDelete, $passive);
 
         if (!$noWait) {
+            $messageCount = $this->broker()->readyMessageCount($destination);
             $this->writeFrame(Frame::methodFrame(
                 $frame->channel,
                 50,
                 11,
-                $this->shortString($destination->name) . pack('NN', 0, 0)
+                $this->shortString($destination->name) . pack('NN', $messageCount, 0)
             ));
         }
     }
@@ -1566,7 +1567,12 @@ final class AmqpConnection
             0,
             10,
             10,
-            "\x00\x09" . $this->table([]) . $this->longString('PLAIN') . $this->longString('en_US')
+            "\x00\x09" . $this->fieldTable([
+                'capabilities' => [
+                    'basic.nack' => true,
+                    'publisher_confirms' => true,
+                ],
+            ]) . $this->longString('PLAIN') . $this->longString('en_US')
         );
     }
 
@@ -1609,6 +1615,8 @@ final class AmqpConnection
                 $payload .= 't' . chr($value ? 1 : 0);
             } elseif (is_int($value)) {
                 $payload .= 'I' . pack('N', $value);
+            } elseif (is_array($value)) {
+                $payload .= 'F' . $this->fieldTable($value);
             } elseif ($value === null) {
                 $payload .= 'V';
             } else {

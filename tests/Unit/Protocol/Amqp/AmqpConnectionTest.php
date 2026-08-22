@@ -11,6 +11,7 @@ use Flux\Protocol\Amqp\AmqpConnection;
 use Flux\Protocol\Amqp\AmqpConnectionState;
 use Flux\Protocol\Amqp\Frame;
 use Flux\Protocol\Amqp\FrameCodec;
+use Flux\Protocol\Amqp\AmqpMethodReader;
 use Flux\Protocol\Amqp\ProtocolException;
 use Flux\Runtime\ConnectionRegistry;
 use PHPUnit\Framework\TestCase;
@@ -25,6 +26,23 @@ final class AmqpConnectionTest extends TestCase
 
         self::assertSame(AmqpConnectionState::Starting, $connection->state());
         self::assertSame([10, 10], $this->writtenMethods($socket)[0]);
+    }
+
+    public function testConnectionStartAdvertisesPublisherConfirms(): void
+    {
+        [$connection, $socket] = $this->connection();
+
+        $connection->receive(AmqpConnection::PROTOCOL_HEADER);
+
+        $properties = $this->serverPropertiesFromConnectionStart($socket);
+
+        self::assertSame(
+            [
+                'basic.nack' => true,
+                'publisher_confirms' => true,
+            ],
+            $properties['capabilities'] ?? null
+        );
     }
 
     public function testProtocolHeaderCanArrivePartially(): void
@@ -326,6 +344,31 @@ final class AmqpConnectionTest extends TestCase
         }
 
         return $methods;
+    }
+
+    /**
+     * @param resource $socket
+     * @return array<string, mixed>
+     */
+    private function serverPropertiesFromConnectionStart(mixed $socket): array
+    {
+        rewind($socket);
+        $bytes = stream_get_contents($socket);
+        self::assertIsString($bytes);
+
+        foreach ((new FrameCodec())->push($bytes) as $frame) {
+            if ($frame->method() !== [10, 10]) {
+                continue;
+            }
+
+            $reader = new AmqpMethodReader(substr($frame->payload, 4));
+            $reader->readOctet();
+            $reader->readOctet();
+
+            return $reader->readTable();
+        }
+
+        self::fail('connection.start was not written.');
     }
 
     private function completeHandshake(AmqpConnection $connection): void

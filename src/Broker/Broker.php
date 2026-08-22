@@ -195,6 +195,11 @@ final readonly class Broker
             ?? throw new RuntimeException(sprintf('Message %d does not exist.', $route->messageId));
     }
 
+    public function readyMessageCount(Destination $destination): int
+    {
+        return $this->deliveries->countReadyByDestination($destination->id);
+    }
+
     public function declareQueue(
         string $virtualHostName,
         string $name,

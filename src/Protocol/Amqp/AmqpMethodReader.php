@@ -106,6 +106,7 @@ final class AmqpMethodReader
                 'b' => $this->readSignedOctet(),
                 's' => $this->readSignedShort(),
                 'I' => $this->readSignedLong(),
+                'F' => $this->readTable(),
                 'V' => null,
                 default => throw new ProtocolException(sprintf('Unsupported AMQP field table type "%s".', $type)),
             };
