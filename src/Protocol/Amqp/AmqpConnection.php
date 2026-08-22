@@ -385,6 +385,7 @@ final class AmqpConnection
                 [60, 10] => $this->handleBasicQos($frame),
                 [60, 40] => $this->handleBasicPublish($frame),
                 [60, 20] => $this->handleBasicConsume($frame),
+                [60, 30] => $this->handleBasicCancel($frame),
                 [60, 70] => $this->handleBasicGet($frame),
                 [60, 80] => $this->handleBasicAck($frame),
                 [60, 90] => $this->handleBasicReject($frame),
@@ -846,6 +847,32 @@ final class AmqpConnection
         }
 
         $this->deliverToConsumers();
+    }
+
+    private function handleBasicCancel(Frame $frame): void
+    {
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $consumerTag = $reader->readShortString();
+        $bits = $reader->readOctet();
+        $reader->assertComplete();
+
+        $state = $this->activeConsumers[$consumerTag] ?? null;
+        if ($state === null || $state['channel'] !== $frame->channel) {
+            $this->sendChannelError(
+                $frame->channel,
+                404,
+                sprintf('NOT_FOUND - consumer tag "%s" is not active on this channel', $consumerTag),
+                60,
+                30
+            );
+            return;
+        }
+
+        $this->cancelConsumer($consumerTag);
+
+        if (($bits & 0b00000001) === 0) {
+            $this->writeFrame(Frame::methodFrame($frame->channel, 60, 31, $this->shortString($consumerTag)));
+        }
     }
 
     private function handleBasicGet(Frame $frame): void
@@ -1371,6 +1398,8 @@ final class AmqpConnection
 
     private function closeChannel(int $channel): void
     {
+        $this->releaseOutstandingDeliveries($channel);
+
         unset(
             $this->channels[$channel],
             $this->prefetchCounts[$channel],
@@ -1385,8 +1414,12 @@ final class AmqpConnection
                 $this->removeConsumer($consumerTag);
             }
         }
+    }
 
-        $this->releaseOutstandingDeliveries($channel);
+    private function cancelConsumer(string $consumerTag): void
+    {
+        $this->releaseOutstandingDeliveriesForConsumer($consumerTag);
+        $this->removeConsumer($consumerTag);
     }
 
     private function removeConsumer(string $consumerTag): void
@@ -1447,6 +1480,32 @@ final class AmqpConnection
 
         if ($released > 0) {
             error_log(sprintf('AMQP unacked deliveries released: %d', $released));
+        }
+    }
+
+    private function releaseOutstandingDeliveriesForConsumer(string $consumerTag): void
+    {
+        $released = 0;
+
+        foreach ($this->unackedDeliveries as $channel => $deliveries) {
+            foreach ($deliveries as $deliveryTag => $mapping) {
+                if ($mapping['consumer_tag'] !== $consumerTag) {
+                    continue;
+                }
+
+                try {
+                    $this->broker()->release(new ReleaseRequest($mapping['delivery']->id));
+                    $released++;
+                } catch (RuntimeException) {
+                }
+                unset($this->unackedDeliveries[$channel][$deliveryTag]);
+            }
+
+            $this->clearEmptyUnackedChannel($channel);
+        }
+
+        if ($released > 0) {
+            error_log(sprintf('AMQP consumer unacked deliveries released: %d', $released));
         }
     }
 
