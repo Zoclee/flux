@@ -9,6 +9,8 @@ use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\ConnectionConfig;
 use Flux\Persistence\Postgres\DeliveryRepository;
 use Flux\Persistence\Postgres\DestinationRepository;
+use Flux\Persistence\Postgres\MessageRepository;
+use Flux\Persistence\Postgres\MessageRouteRepository;
 use Flux\Persistence\Postgres\PublishTransaction;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\RoutingSourceRepository;
@@ -70,7 +72,9 @@ final class ServerStartCommand
                 new SubscriptionRepository($connection),
                 new DeliveryRepository($connection),
                 new BindingRepository($connection),
-                new RoutingSourceRepository($connection)
+                new RoutingSourceRepository($connection),
+                new MessageRouteRepository($connection),
+                new MessageRepository($connection)
             );
             $connections = new ConnectionRegistry();
             $consumers = new ConsumerRegistry();
@@ -140,7 +144,7 @@ final class ServerStartCommand
             $connections,
             $consumers,
             components: [
-                new AmqpListener($connections, $this->amqpHost, $this->amqpPort, broker: $broker),
+                new AmqpListener($connections, $this->amqpHost, $this->amqpPort, broker: $broker, consumers: $consumers),
             ]
         );
     }

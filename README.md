@@ -2,7 +2,7 @@
 
 Flux is an unified message broker with PostgreSQL persistence.
 
-Flux is currently pre-MVP. Phase 3.2 supports the first AMQP 0-9-1 network adapter: TCP connection handshake, runtime-only channels, queue declarations, direct exchange declarations, and exact queue bindings. Publishing, consuming, acknowledgements, production authentication, and advanced AMQP topology are not implemented yet.
+Flux is currently pre-MVP. Phase 3.3 supports a minimal AMQP 0-9-1 MVP: TCP connection handshake, runtime-only channels, queue declarations, direct exchange declarations, exact queue bindings, basic publishing, basic consuming, acknowledgements, and rejects. Production authentication and advanced AMQP topology are not implemented yet.
 
 ## Requirements
 

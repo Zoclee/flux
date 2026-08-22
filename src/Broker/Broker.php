@@ -8,6 +8,8 @@ use Flux\Persistence\Postgres\PublishTransaction;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\DeliveryRepository;
 use Flux\Persistence\Postgres\DestinationRepository;
+use Flux\Persistence\Postgres\MessageRepository;
+use Flux\Persistence\Postgres\MessageRouteRepository;
 use Flux\Persistence\Postgres\RoutingSourceRepository;
 use Flux\Persistence\Postgres\SubscriptionRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
@@ -22,7 +24,9 @@ final readonly class Broker
         private SubscriptionRepository $subscriptions,
         private DeliveryRepository $deliveries,
         private ?BindingRepository $bindings = null,
-        private ?RoutingSourceRepository $routingSources = null
+        private ?RoutingSourceRepository $routingSources = null,
+        private ?MessageRouteRepository $messageRoutes = null,
+        private ?MessageRepository $messages = null
     ) {
     }
 
@@ -32,6 +36,13 @@ final readonly class Broker
 
         if ($virtualHost === null) {
             throw VirtualHostNotFoundException::forName($request->virtualHost);
+        }
+
+        if ($this->routingSources !== null && $this->routingSources->findByName($virtualHost->id, $request->source) === null) {
+            throw new TopologyException(
+                sprintf('Routing source "%s" does not exist.', $request->source),
+                TopologyException::NOT_FOUND
+            );
         }
 
         return $this->publisher->publish(
@@ -86,6 +97,75 @@ final readonly class Broker
         return $this->deliveries->release($request->deliveryId, $request->availableAt);
     }
 
+    /**
+     * @param array<string, mixed> $headers
+     */
+    public function publishToDefaultExchange(
+        string $virtualHostName,
+        string $queue,
+        string $payload,
+        array $headers = [],
+        ?string $contentType = null,
+        ?string $contentEncoding = null,
+        int $priority = 0,
+        bool $persistent = true,
+        ?string $messageId = null
+    ): PublishResult {
+        $virtualHost = $this->virtualHosts->findByName($virtualHostName);
+        if ($virtualHost === null) {
+            throw VirtualHostNotFoundException::forName($virtualHostName);
+        }
+
+        $destination = $this->destinations->findByName($virtualHost->id, $queue);
+        if ($destination === null || $destination->type !== DestinationType::Queue) {
+            throw new TopologyException(sprintf('Queue "%s" does not exist.', $queue), TopologyException::NOT_FOUND);
+        }
+
+        return $this->publisher->publishToDestination(
+            $destination->id,
+            $payload,
+            $headers,
+            $contentType,
+            $contentEncoding,
+            $priority,
+            $persistent,
+            $messageId
+        );
+    }
+
+    public function ensureQueueSubscription(string $virtualHostName, string $queue, string $subscriptionName): Subscription
+    {
+        if ($subscriptionName === '') {
+            throw new TopologyException('Subscription name must not be empty.', TopologyException::PRECONDITION_FAILED);
+        }
+
+        $virtualHost = $this->virtualHosts->findByName($virtualHostName);
+        if ($virtualHost === null) {
+            throw VirtualHostNotFoundException::forName($virtualHostName);
+        }
+
+        $destination = $this->destinations->findByName($virtualHost->id, $queue);
+        if ($destination === null || $destination->type !== DestinationType::Queue) {
+            throw new TopologyException(sprintf('Queue "%s" does not exist.', $queue), TopologyException::NOT_FOUND);
+        }
+
+        $subscription = $this->subscriptions->findByName($destination->id, $subscriptionName);
+        if ($subscription !== null) {
+            return $subscription;
+        }
+
+        return $this->subscriptions->create($destination->id, $subscriptionName, false, ['declared_by' => 'amqp']);
+    }
+
+    public function messageForDelivery(Delivery $delivery): Message
+    {
+        $route = $this->messageRoutes()->findById($delivery->messageRouteId)
+            ?? throw new RuntimeException(sprintf('Message route %d does not exist.', $delivery->messageRouteId));
+
+        return $this->messages()->findById($route->messageId)
+            ?? throw new RuntimeException(sprintf('Message %d does not exist.', $route->messageId));
+    }
+
     public function declareQueue(
         string $virtualHostName,
         string $name,
@@ -108,7 +188,7 @@ final readonly class Broker
                 throw new TopologyException(sprintf('Queue "%s" does not exist.', $name), TopologyException::NOT_FOUND);
             }
 
-            return $this->destinations->create(
+            $destination = $this->destinations->create(
                 $virtualHost->id,
                 $name,
                 DestinationType::Queue,
@@ -116,6 +196,10 @@ final readonly class Broker
                 $autoDelete,
                 ['declared_by' => 'topology']
             );
+
+            $this->ensureQueueSubscription($virtualHostName, $destination->name, 'amqp');
+
+            return $destination;
         }
 
         if (
@@ -128,6 +212,8 @@ final readonly class Broker
                 TopologyException::PRECONDITION_FAILED
             );
         }
+
+        $this->ensureQueueSubscription($virtualHostName, $destination->name, 'amqp');
 
         return $destination;
     }
@@ -230,5 +316,15 @@ final readonly class Broker
     private function routingSources(): RoutingSourceRepository
     {
         return $this->routingSources ?? throw new RuntimeException('Broker topology routing source repository is not configured.');
+    }
+
+    private function messageRoutes(): MessageRouteRepository
+    {
+        return $this->messageRoutes ?? throw new RuntimeException('Broker message route repository is not configured.');
+    }
+
+    private function messages(): MessageRepository
+    {
+        return $this->messages ?? throw new RuntimeException('Broker message repository is not configured.');
     }
 }

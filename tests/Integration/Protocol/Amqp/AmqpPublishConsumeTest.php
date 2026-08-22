@@ -1,0 +1,386 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Flux\Tests\Integration\Protocol\Amqp;
+
+use Flux\Broker\Broker;
+use Flux\Broker\DeliveryState;
+use Flux\Persistence\Postgres\BindingRepository;
+use Flux\Persistence\Postgres\Connection;
+use Flux\Persistence\Postgres\DeliveryRepository;
+use Flux\Persistence\Postgres\DestinationRepository;
+use Flux\Persistence\Postgres\MessageRepository;
+use Flux\Persistence\Postgres\MessageRouteRepository;
+use Flux\Persistence\Postgres\Migrator;
+use Flux\Persistence\Postgres\PublishTransaction;
+use Flux\Persistence\Postgres\RoutingSourceRepository;
+use Flux\Persistence\Postgres\SubscriptionRepository;
+use Flux\Persistence\Postgres\VirtualHostRepository;
+use Flux\Protocol\Amqp\AmqpConnection;
+use Flux\Protocol\Amqp\AmqpListener;
+use Flux\Protocol\Amqp\Frame;
+use Flux\Protocol\Amqp\FrameCodec;
+use Flux\Runtime\ConnectionRegistry;
+use Flux\Runtime\ConsumerRegistry;
+use PDO;
+use PHPUnit\Framework\Attributes\Before;
+use PHPUnit\Framework\TestCase;
+
+final class AmqpPublishConsumeTest extends TestCase
+{
+    private Connection $connection;
+    private PDO $pdo;
+    private int $virtualHostId;
+
+    /**
+     * @var list<Frame>
+     */
+    private array $pendingFrames = [];
+
+    #[Before]
+    public function setUpDatabase(): void
+    {
+        if (!extension_loaded('pdo_pgsql')) {
+            self::markTestSkipped('The pdo_pgsql extension is required for AMQP publish/consume integration tests.');
+        }
+
+        $dsn = getenv('FLUX_TEST_DATABASE_URL');
+        if ($dsn === false || $dsn === '') {
+            self::markTestSkipped('Set FLUX_TEST_DATABASE_URL to run AMQP publish/consume integration tests.');
+        }
+
+        $this->connection = Connection::fromDsn($dsn);
+        $this->pdo = $this->connection->pdo();
+        $this->assertSafeTestDatabase();
+        $this->resetSchema();
+        (new Migrator($this->connection, dirname(__DIR__, 4) . '/database/migrations'))->migrate();
+        $this->virtualHostId = (new VirtualHostRepository($this->connection))->findByName('/')?->id
+            ?? throw new \RuntimeException('Default virtual host was not created by migrations.');
+    }
+
+    public function testDefaultExchangePublishConsumeAndAckPreservesBinaryBodyAndProperties(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+        $payload = "hello\x00world\xff";
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('', 'orders'));
+            fwrite($client, $codec->encode($this->contentHeader(1, strlen($payload), 'application/octet-stream', 7)));
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, substr($payload, 0, 5))));
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, substr($payload, 5))));
+            $listener->tick();
+
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $deliver = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 60], $deliver->method());
+            $deliveryTag = $this->deliveryTagFromDeliver($deliver);
+            $header = $this->readFrame($listener, $client);
+            self::assertSame(Frame::TYPE_HEADER, $header->type);
+            self::assertSame(strlen($payload), $this->bodySizeFromHeader($header));
+            $body = $this->readFrame($listener, $client);
+            self::assertSame(Frame::TYPE_BODY, $body->type);
+            self::assertSame($payload, $body->payload);
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong($deliveryTag) . "\x00");
+            $listener->tick();
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        $delivery = $this->singleDelivery('orders');
+        self::assertSame(DeliveryState::Acknowledged, $delivery->state);
+
+        $message = (new MessageRepository($this->connection))->findById(
+            (new MessageRouteRepository($this->connection))->findById($delivery->messageRouteId)?->messageId ?? 0
+        );
+        self::assertNotNull($message);
+        self::assertSame($payload, $message->payload);
+        self::assertSame('application/octet-stream', $message->contentType);
+        self::assertSame(7, $message->priority);
+    }
+
+    public function testDirectExchangeRejectWithRequeueRedeliversThenRejects(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 40, 10, $this->exchangeDeclare('orders.direct'));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('orders', 'orders.direct', 'created'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('orders.direct', 'created'));
+            fwrite($client, $codec->encode($this->contentHeader(1, 5)));
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, 'first')));
+            $listener->tick();
+
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $first = $this->readMethodFrame($listener, $client);
+            $firstTag = $this->deliveryTagFromDeliver($first);
+            $this->readFrame($listener, $client);
+            self::assertSame('first', $this->readFrame($listener, $client)->payload);
+
+            $this->sendMethod($client, 1, 60, 90, $this->packLongLong($firstTag) . "\x01");
+            $redelivered = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 60], $redelivered->method());
+            $secondTag = $this->deliveryTagFromDeliver($redelivered);
+            self::assertNotSame($firstTag, $secondTag);
+            $this->readFrame($listener, $client);
+            self::assertSame('first', $this->readFrame($listener, $client)->payload);
+
+            $this->sendMethod($client, 1, 60, 90, $this->packLongLong($secondTag) . "\x00");
+            $listener->tick();
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(DeliveryState::Rejected, $this->singleDelivery('orders')->state);
+    }
+
+    public function testDisconnectReleasesUnackedDeliveries(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('', 'orders'));
+            fwrite($client, $codec->encode($this->contentHeader(1, 4)));
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, 'held')));
+            $listener->tick();
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->readMethodFrame($listener, $client);
+            $this->readFrame($listener, $client);
+            $this->readFrame($listener, $client);
+            fclose($client);
+            for ($i = 0; $i < 10; $i++) {
+                $listener->tick();
+                usleep(1000);
+            }
+        } finally {
+            $listener->stop();
+        }
+
+        self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
+    }
+
+    /**
+     * @return array{0: AmqpListener, 1: resource}
+     */
+    private function startedListener(): array
+    {
+        $listener = new AmqpListener(
+            new ConnectionRegistry(),
+            '127.0.0.1',
+            0,
+            broker: $this->broker(),
+            consumers: new ConsumerRegistry()
+        );
+        $listener->start();
+        $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $listener->port()), $errorCode, $errorMessage, 1.0);
+        self::assertIsResource($client, sprintf('Could not connect to AMQP listener: %s', $errorMessage));
+        stream_set_blocking($client, false);
+
+        return [$listener, $client];
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function connectAndOpenChannel(AmqpListener $listener, mixed $client, int $channel): void
+    {
+        $codec = new FrameCodec();
+        fwrite($client, AmqpConnection::PROTOCOL_HEADER);
+        self::assertSame([10, 10], $this->readMethod($listener, $client));
+        $this->sendMethod($client, 0, 10, 11);
+        self::assertSame([10, 30], $this->readMethod($listener, $client));
+        $this->sendMethod($client, 0, 10, 31);
+        $listener->tick();
+        $this->sendMethod($client, 0, 10, 40);
+        self::assertSame([10, 41], $this->readMethod($listener, $client));
+        fwrite($client, $codec->encode(Frame::methodFrame($channel, 20, 10, "\x00")));
+        self::assertSame([20, 11], $this->readMethod($listener, $client));
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function sendMethod(mixed $client, int $channel, int $classId, int $methodId, string $arguments = ''): void
+    {
+        fwrite($client, (new FrameCodec())->encode(Frame::methodFrame($channel, $classId, $methodId, $arguments)));
+    }
+
+    private function queueDeclare(string $queue): string
+    {
+        return pack('n', 0) . $this->shortString($queue) . "\x02" . pack('N', 0);
+    }
+
+    private function exchangeDeclare(string $exchange): string
+    {
+        return pack('n', 0) . $this->shortString($exchange) . $this->shortString('direct') . "\x02" . pack('N', 0);
+    }
+
+    private function queueBind(string $queue, string $exchange, string $routingKey): string
+    {
+        return pack('n', 0) . $this->shortString($queue) . $this->shortString($exchange) . $this->shortString($routingKey) . "\x00" . pack('N', 0);
+    }
+
+    private function basicPublish(string $exchange, string $routingKey): string
+    {
+        return pack('n', 0) . $this->shortString($exchange) . $this->shortString($routingKey) . "\x00";
+    }
+
+    private function basicConsume(string $queue, string $consumerTag): string
+    {
+        return pack('n', 0) . $this->shortString($queue) . $this->shortString($consumerTag) . "\x00" . pack('N', 0);
+    }
+
+    private function contentHeader(int $channel, int $bodySize, ?string $contentType = null, int $priority = 0): Frame
+    {
+        $flags = 0b0001000000000000 | 0b0000100000000000;
+        $values = "\x02" . chr($priority);
+        if ($contentType !== null) {
+            $flags |= 0b1000000000000000;
+            $values = $this->shortString($contentType) . $values;
+        }
+
+        return new Frame(Frame::TYPE_HEADER, $channel, pack('nn', 60, 0) . $this->packLongLong($bodySize) . pack('n', $flags) . $values);
+    }
+
+    private function shortString(string $value): string
+    {
+        return chr(strlen($value)) . $value;
+    }
+
+    private function packLongLong(int $value): string
+    {
+        return pack('NN', intdiv($value, 4294967296), $value % 4294967296);
+    }
+
+    private function deliveryTagFromDeliver(Frame $frame): int
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readShortString();
+
+        return $reader->readLongLong();
+    }
+
+    private function bodySizeFromHeader(Frame $frame): int
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader($frame->payload);
+        $reader->readShort();
+        $reader->readShort();
+
+        return $reader->readLongLong();
+    }
+
+    /**
+     * @param resource $client
+     * @return array{0: int, 1: int}
+     */
+    private function readMethod(AmqpListener $listener, mixed $client): array
+    {
+        return $this->readMethodFrame($listener, $client)->method();
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function readMethodFrame(AmqpListener $listener, mixed $client): Frame
+    {
+        $frame = $this->readFrame($listener, $client);
+        self::assertSame(Frame::TYPE_METHOD, $frame->type);
+
+        return $frame;
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function readFrame(AmqpListener $listener, mixed $client): Frame
+    {
+        if ($this->pendingFrames !== []) {
+            return array_shift($this->pendingFrames);
+        }
+
+        $codec = new FrameCodec();
+
+        for ($attempt = 0; $attempt < 200; $attempt++) {
+            $listener->tick();
+            $bytes = fread($client, 8192);
+            if (is_string($bytes) && $bytes !== '') {
+                $frames = $codec->push($bytes);
+                if ($frames !== []) {
+                    $this->pendingFrames = array_slice($frames, 1);
+
+                    return $frames[0];
+                }
+            }
+            usleep(1000);
+        }
+
+        self::fail('Timed out waiting for AMQP frame.');
+    }
+
+    private function singleDelivery(string $queue): \Flux\Broker\Delivery
+    {
+        $destination = (new DestinationRepository($this->connection))->findByName($this->virtualHostId, $queue);
+        self::assertNotNull($destination);
+        $subscription = (new SubscriptionRepository($this->connection))->findByName($destination->id, 'amqp');
+        self::assertNotNull($subscription);
+        $deliveries = (new DeliveryRepository($this->connection))->allBySubscription($subscription->id);
+        self::assertCount(1, $deliveries);
+
+        return $deliveries[0];
+    }
+
+    private function broker(): Broker
+    {
+        return new Broker(
+            new VirtualHostRepository($this->connection),
+            new PublishTransaction($this->connection),
+            new DestinationRepository($this->connection),
+            new SubscriptionRepository($this->connection),
+            new DeliveryRepository($this->connection),
+            new BindingRepository($this->connection),
+            new RoutingSourceRepository($this->connection),
+            new MessageRouteRepository($this->connection),
+            new MessageRepository($this->connection)
+        );
+    }
+
+    private function resetSchema(): void
+    {
+        $this->pdo->exec('DROP SCHEMA public CASCADE');
+        $this->pdo->exec('CREATE SCHEMA public');
+    }
+
+    private function assertSafeTestDatabase(): void
+    {
+        $database = (string) $this->pdo->query('SELECT current_database()')->fetchColumn();
+
+        if (!str_contains(strtolower($database), 'test')) {
+            self::markTestSkipped(sprintf(
+                'Refusing to reset PostgreSQL database "%s"; FLUX_TEST_DATABASE_URL must point to a test database.',
+                $database
+            ));
+        }
+    }
+}

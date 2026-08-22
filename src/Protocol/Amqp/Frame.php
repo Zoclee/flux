@@ -9,6 +9,8 @@ use InvalidArgumentException;
 final readonly class Frame
 {
     public const TYPE_METHOD = 1;
+    public const TYPE_HEADER = 2;
+    public const TYPE_BODY = 3;
 
     public function __construct(
         public int $type,

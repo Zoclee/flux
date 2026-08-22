@@ -6,6 +6,7 @@ namespace Flux\Protocol\Amqp;
 
 use Flux\Broker\Broker;
 use Flux\Runtime\ConnectionRegistry;
+use Flux\Runtime\ConsumerRegistry;
 use Flux\Runtime\RuntimeComponent;
 use RuntimeException;
 
@@ -26,7 +27,8 @@ final class AmqpListener implements RuntimeComponent
         private string $host = '127.0.0.1',
         private int $port = 5672,
         private readonly int $maxFrameSize = 131072,
-        private readonly ?Broker $broker = null
+        private readonly ?Broker $broker = null,
+        private readonly ?ConsumerRegistry $consumers = null
     ) {
         if ($this->host === '') {
             throw new RuntimeException('AMQP listener host must not be empty.');
@@ -72,7 +74,13 @@ final class AmqpListener implements RuntimeComponent
 
         while (($client = @stream_socket_accept($this->server, 0)) !== false) {
             $key = (string) (int) $client;
-            $this->connections[$key] = new AmqpConnection($client, $this->runtimeConnections, $this->maxFrameSize, $this->broker);
+            $this->connections[$key] = new AmqpConnection(
+                $client,
+                $this->runtimeConnections,
+                $this->maxFrameSize,
+                $this->broker,
+                $this->consumers
+            );
         }
 
         foreach ($this->connections as $key => $connection) {

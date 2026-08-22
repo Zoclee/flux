@@ -78,6 +78,50 @@ final readonly class PublishTransaction
     }
 
     /**
+     * @param array<string, mixed> $headers
+     */
+    public function publishToDestination(
+        int $destinationId,
+        string $payload,
+        array $headers = [],
+        ?string $contentType = null,
+        ?string $contentEncoding = null,
+        int $priority = 0,
+        bool $persistent = true,
+        ?string $messageId = null
+    ): PublishResult {
+        return $this->connection->transaction(function () use (
+            $destinationId,
+            $payload,
+            $headers,
+            $contentType,
+            $contentEncoding,
+            $priority,
+            $persistent,
+            $messageId
+        ): PublishResult {
+            $message = $this->messages->create(
+                $payload,
+                $headers,
+                $contentType,
+                $contentEncoding,
+                $priority,
+                $persistent,
+                $messageId
+            );
+
+            $route = $this->routes->create($message->id, $destinationId);
+            $deliveries = [];
+
+            foreach ($this->subscriptions->allByDestination($destinationId) as $subscription) {
+                $deliveries[] = $this->deliveries->create($route->id, $subscription->id);
+            }
+
+            return new PublishResult($message, [$route], $deliveries);
+        });
+    }
+
+    /**
      * @param list<Binding> $bindings
      * @return list<int>
      */
