@@ -117,6 +117,47 @@ final class BrokerTopologyManagementTest extends TestCase
         }
     }
 
+    public function testPassiveQueueDeclarationInspectsExistingQueueWithoutCompatibilityCheck(): void
+    {
+        $queue = $this->broker->declareQueue('/', 'orders', true, false);
+
+        $passive = $this->broker->declareQueue('/', 'orders', false, true, passive: true);
+        $status = $this->broker->queueStatus('/', 'orders');
+
+        self::assertSame($queue->id, $passive->id);
+        self::assertSame($queue->id, $status->destination->id);
+        self::assertSame(0, $status->messageCount);
+
+        $stored = $this->destinations->findByName($this->virtualHostId, 'orders');
+        self::assertNotNull($stored);
+        self::assertTrue($stored->durable);
+        self::assertFalse($stored->autoDelete);
+    }
+
+    public function testPassiveQueueDeclarationOfMissingQueueFailsWithoutCreatingQueue(): void
+    {
+        try {
+            $this->broker->declareQueue('/', 'missing', false, false, passive: true);
+            self::fail('Passive queue declaration should fail when the queue does not exist.');
+        } catch (TopologyException $exception) {
+            self::assertSame(TopologyException::NOT_FOUND, $exception->reason);
+        }
+
+        self::assertNull($this->destinations->findByName($this->virtualHostId, 'missing'));
+    }
+
+    public function testActiveIncompatibleQueueRedeclarationStillFails(): void
+    {
+        $this->broker->declareQueue('/', 'orders', true, false);
+
+        try {
+            $this->broker->declareQueue('/', 'orders', false, false);
+            self::fail('Active incompatible queue redeclaration should fail.');
+        } catch (TopologyException $exception) {
+            self::assertSame(TopologyException::PRECONDITION_FAILED, $exception->reason);
+        }
+    }
+
     public function testUnbindAndDeleteRoutingSourceAffectFutureRoutingOnly(): void
     {
         $this->broker->declareQueue('/', 'orders', true, false);
@@ -168,6 +209,47 @@ final class BrokerTopologyManagementTest extends TestCase
                 self::assertSame(TopologyException::PRECONDITION_FAILED, $exception->reason);
             }
         }
+    }
+
+    public function testPassiveRoutingSourceDeclarationInspectsExistingSourceWithoutPropertyCompatibilityCheck(): void
+    {
+        $source = $this->broker->declareDirectRoutingSource('/', 'events', true, false);
+
+        $passive = $this->broker->declareDirectRoutingSource('/', 'events', false, true, passive: true);
+        $status = $this->broker->routingSourceStatus('/', 'events', RoutingSourceType::Direct);
+
+        self::assertSame($source->id, $passive->id);
+        self::assertSame($source->id, $status->id);
+
+        $stored = $this->routingSources->findByName($this->virtualHostId, 'events');
+        self::assertNotNull($stored);
+        self::assertSame(RoutingSourceType::Direct, $stored->type);
+        self::assertTrue($stored->durable);
+        self::assertFalse($stored->autoDelete);
+    }
+
+    public function testPassiveRoutingSourceDeclarationWithWrongTypeStillFails(): void
+    {
+        $this->broker->declareDirectRoutingSource('/', 'events', true, false);
+
+        try {
+            $this->broker->declareFanoutRoutingSource('/', 'events', false, false, passive: true);
+            self::fail('Passive routing-source declaration with a different type should fail.');
+        } catch (TopologyException $exception) {
+            self::assertSame(TopologyException::PRECONDITION_FAILED, $exception->reason);
+        }
+    }
+
+    public function testPassiveRoutingSourceDeclarationOfMissingSourceFailsWithoutCreatingSource(): void
+    {
+        try {
+            $this->broker->declareDirectRoutingSource('/', 'missing', false, false, passive: true);
+            self::fail('Passive routing-source declaration should fail when the source does not exist.');
+        } catch (TopologyException $exception) {
+            self::assertSame(TopologyException::NOT_FOUND, $exception->reason);
+        }
+
+        self::assertNull($this->routingSources->findByName($this->virtualHostId, 'missing'));
     }
 
     public function testFanoutBindPublishUnbindAndDelete(): void

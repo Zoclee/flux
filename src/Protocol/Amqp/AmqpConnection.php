@@ -542,7 +542,7 @@ final class AmqpConnection
         $reader->skipTable();
         $reader->assertComplete();
 
-        if ($exclusive) {
+        if (!$passive && $exclusive) {
             throw new TopologyException('Exclusive queues are not supported yet.', TopologyException::NOT_IMPLEMENTED);
         }
 
@@ -550,15 +550,22 @@ final class AmqpConnection
             return;
         }
 
-        $destination = $this->broker()->declareQueue($this->openedVirtualHost(), $queue, $durable, $autoDelete, $passive);
+        if ($passive) {
+            $status = $this->broker()->queueStatus($this->openedVirtualHost(), $queue);
+            $destination = $status->destination;
+            $messageCount = $status->messageCount;
+        } else {
+            $destination = $this->broker()->declareQueue($this->openedVirtualHost(), $queue, $durable, $autoDelete);
+            $messageCount = $this->broker()->readyMessageCount($destination);
+        }
 
         if (!$noWait) {
-            $messageCount = $this->broker()->readyMessageCount($destination);
+            $consumerCount = $this->consumers->countByDestination($this->openedVirtualHost(), $destination->name);
             $this->writeFrame(Frame::methodFrame(
                 $frame->channel,
                 50,
                 11,
-                $this->shortString($destination->name) . pack('NN', $messageCount, 0)
+                $this->shortString($destination->name) . pack('NN', $messageCount, $consumerCount)
             ));
         }
     }
@@ -590,7 +597,7 @@ final class AmqpConnection
             throw new TopologyException(sprintf('Exchange type "%s" is not supported.', $type), TopologyException::NOT_IMPLEMENTED);
         }
 
-        if ($internal) {
+        if (!$passive && $internal) {
             throw new TopologyException('Internal exchanges are not supported yet.', TopologyException::NOT_IMPLEMENTED);
         }
 
@@ -598,29 +605,30 @@ final class AmqpConnection
             return;
         }
 
-        match ($sourceType) {
-            RoutingSourceType::Direct => $this->broker()->declareDirectRoutingSource(
-                $this->openedVirtualHost(),
-                $exchange,
-                $durable,
-                $autoDelete,
-                $passive
-            ),
-            RoutingSourceType::Fanout => $this->broker()->declareFanoutRoutingSource(
-                $this->openedVirtualHost(),
-                $exchange,
-                $durable,
-                $autoDelete,
-                $passive
-            ),
-            RoutingSourceType::Topic => $this->broker()->declareTopicRoutingSource(
-                $this->openedVirtualHost(),
-                $exchange,
-                $durable,
-                $autoDelete,
-                $passive
-            ),
-        };
+        if ($passive) {
+            $this->broker()->routingSourceStatus($this->openedVirtualHost(), $exchange, $sourceType);
+        } else {
+            match ($sourceType) {
+                RoutingSourceType::Direct => $this->broker()->declareDirectRoutingSource(
+                    $this->openedVirtualHost(),
+                    $exchange,
+                    $durable,
+                    $autoDelete
+                ),
+                RoutingSourceType::Fanout => $this->broker()->declareFanoutRoutingSource(
+                    $this->openedVirtualHost(),
+                    $exchange,
+                    $durable,
+                    $autoDelete
+                ),
+                RoutingSourceType::Topic => $this->broker()->declareTopicRoutingSource(
+                    $this->openedVirtualHost(),
+                    $exchange,
+                    $durable,
+                    $autoDelete
+                ),
+            };
+        }
 
         if (!$noWait) {
             $this->writeFrame(Frame::methodFrame($frame->channel, 40, 11));

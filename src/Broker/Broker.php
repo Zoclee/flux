@@ -203,6 +203,17 @@ final readonly class Broker
         return $this->deliveries->countReadyByDestination($destination->id);
     }
 
+    public function queueStatus(string $virtualHostName, string $name): QueueStatus
+    {
+        if ($name === '') {
+            throw new TopologyException('Queue name must not be empty.', TopologyException::PRECONDITION_FAILED);
+        }
+
+        $destination = $this->queueDestination($virtualHostName, $name);
+
+        return new QueueStatus($destination, $this->readyMessageCount($destination));
+    }
+
     public function declareQueue(
         string $virtualHostName,
         string $name,
@@ -240,6 +251,14 @@ final readonly class Broker
             );
 
             $this->ensureQueueSubscription($virtualHostName, $destination->name, 'amqp');
+
+            return $destination;
+        }
+
+        if ($passive) {
+            if ($destination->type !== DestinationType::Queue) {
+                throw new TopologyException(sprintf('Queue "%s" does not exist.', $name), TopologyException::NOT_FOUND);
+            }
 
             return $destination;
         }
@@ -311,13 +330,10 @@ final readonly class Broker
         );
     }
 
-    private function declareRoutingSource(
+    public function routingSourceStatus(
         string $virtualHostName,
         string $name,
-        RoutingSourceType $type,
-        bool $durable,
-        bool $autoDelete,
-        bool $passive = false
+        RoutingSourceType $type
     ): RoutingSource {
         if ($name === '') {
             throw new TopologyException(
@@ -334,13 +350,49 @@ final readonly class Broker
 
         $source = $routingSources->findByName($virtualHost->id, $name);
         if ($source === null) {
-            if ($passive) {
-                throw new TopologyException(
-                    sprintf('Routing source "%s" does not exist.', $name),
-                    TopologyException::NOT_FOUND
-                );
-            }
+            throw new TopologyException(
+                sprintf('Routing source "%s" does not exist.', $name),
+                TopologyException::NOT_FOUND
+            );
+        }
 
+        if ($source->type !== $type) {
+            throw new TopologyException(
+                sprintf('Routing source "%s" exists with incompatible properties.', $name),
+                TopologyException::PRECONDITION_FAILED
+            );
+        }
+
+        return $source;
+    }
+
+    private function declareRoutingSource(
+        string $virtualHostName,
+        string $name,
+        RoutingSourceType $type,
+        bool $durable,
+        bool $autoDelete,
+        bool $passive = false
+    ): RoutingSource {
+        if ($name === '') {
+            throw new TopologyException(
+                'The default AMQP exchange is implicit and cannot be declared.',
+                TopologyException::PRECONDITION_FAILED
+            );
+        }
+
+        if ($passive) {
+            return $this->routingSourceStatus($virtualHostName, $name, $type);
+        }
+
+        $routingSources = $this->routingSources();
+        $virtualHost = $this->virtualHosts->findByName($virtualHostName);
+        if ($virtualHost === null) {
+            throw VirtualHostNotFoundException::forName($virtualHostName);
+        }
+
+        $source = $routingSources->findByName($virtualHost->id, $name);
+        if ($source === null) {
             return $routingSources->create(
                 $virtualHost->id,
                 $name,

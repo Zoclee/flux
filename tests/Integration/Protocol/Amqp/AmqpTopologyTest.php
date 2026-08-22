@@ -118,7 +118,10 @@ final class AmqpTopologyTest extends TestCase
             self::assertSame([50, 11], $this->readMethod($listener, $client));
 
             fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 10, $this->queueDeclare('orders', durable: false))));
-            self::assertSame([20, 40], $this->readMethod($listener, $client));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
 
             fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
             self::assertSame([20, 11], $this->readMethod($listener, $client));
@@ -126,6 +129,75 @@ final class AmqpTopologyTest extends TestCase
             fclose($client);
             $listener->stop();
         }
+    }
+
+    public function testPassiveQueueDeclareIgnoresIncomingPropertiesAndDoesNotMutateQueue(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(
+                1,
+                50,
+                10,
+                $this->queueDeclare('test_durable_queue', durable: true, autoDelete: false)
+            )));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(
+                1,
+                50,
+                10,
+                $this->queueDeclare(
+                    'test_durable_queue',
+                    durable: false,
+                    passive: true,
+                    exclusive: true,
+                    autoDelete: true
+                )
+            )));
+            $declareOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 11], $declareOk->method());
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('after.passive', 'direct'))));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        $queue = (new DestinationRepository($this->connection))->findByName($this->virtualHostId, 'test_durable_queue');
+
+        self::assertNotNull($queue);
+        self::assertTrue($queue->durable);
+        self::assertFalse($queue->autoDelete);
+    }
+
+    public function testPassiveQueueDeclareForMissingQueueClosesChannelWithNotFoundAndDoesNotCreateQueue(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(
+                1,
+                50,
+                10,
+                $this->queueDeclare('missing', durable: false, passive: true)
+            )));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(404, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertNull((new DestinationRepository($this->connection))->findByName($this->virtualHostId, 'missing'));
     }
 
     public function testUnsupportedExchangeTypeClosesChannel(): void
@@ -188,6 +260,216 @@ final class AmqpTopologyTest extends TestCase
         self::assertNotNull($source);
         self::assertSame('topic', $source->type->value);
         self::assertTrue($source->durable);
+    }
+
+    public function testPassiveExchangeDeclareIgnoresDurabilityAutoDeleteAndInternalFlagsWithoutMutatingSource(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(
+                1,
+                40,
+                10,
+                $this->exchangeDeclare('test_durable_exchange', 'direct', durable: true)
+            )));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(
+                1,
+                40,
+                10,
+                $this->exchangeDeclare(
+                    'test_durable_exchange',
+                    'direct',
+                    durable: false,
+                    passive: true,
+                    autoDelete: true,
+                    internal: true
+                )
+            )));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 10, $this->queueDeclare('after-passive', durable: true))));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        $source = (new RoutingSourceRepository($this->connection))->findByName($this->virtualHostId, 'test_durable_exchange');
+
+        self::assertNotNull($source);
+        self::assertSame('direct', $source->type->value);
+        self::assertTrue($source->durable);
+        self::assertFalse($source->autoDelete);
+        self::assertSame(['declared_by' => 'topology'], $source->metadata);
+    }
+
+    public function testPassiveExchangeDeclareWithMatchingDirectFanoutAndTopicTypesSucceeds(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+
+            foreach ([
+                'events.direct' => 'direct',
+                'events.fanout' => 'fanout',
+                'events.topic' => 'topic',
+            ] as $exchange => $type) {
+                fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare($exchange, $type, durable: true))));
+                self::assertSame([40, 11], $this->readMethod($listener, $client));
+
+                fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare($exchange, $type, passive: true))));
+                self::assertSame([40, 11], $this->readMethod($listener, $client));
+            }
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testPassiveExchangeDeclareWithWrongTypeClosesChannelWithPreconditionFailed(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'direct', durable: true))));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'fanout', passive: true))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testPassiveExchangeDeclareForMissingExchangeClosesChannelWithNotFoundAndDoesNotCreateSource(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('missing', 'direct', passive: true))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(404, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertNull((new RoutingSourceRepository($this->connection))->findByName($this->virtualHostId, 'missing'));
+    }
+
+    public function testActiveExchangeRedeclarationWithIncompatibleDurabilityStillFails(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'direct', durable: true))));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'direct', durable: false))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testPassiveDurableExchangeDeclareSurvivesRestartAndBindingStillRoutes(): void
+    {
+        $codec = new FrameCodec();
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(
+                1,
+                40,
+                10,
+                $this->exchangeDeclare('test_durable_exchange', 'direct', durable: true)
+            )));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 10, $this->queueDeclare('test_durable_queue', durable: true))));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(
+                1,
+                50,
+                20,
+                $this->queueBind('test_durable_queue', 'test_durable_exchange', 'created')
+            )));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+
+            $this->broker()->publish(new PublishRequest('/', 'test_durable_exchange', 'created', 'before-restart'));
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(1, $this->tableCount('message_routes'));
+            self::assertSame(1, $this->tableCount('deliveries'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(
+                1,
+                40,
+                10,
+                $this->exchangeDeclare('test_durable_exchange', 'direct', passive: true)
+            )));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(
+                1,
+                50,
+                10,
+                $this->queueDeclare('test_durable_queue', durable: false, passive: true)
+            )));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $source = (new RoutingSourceRepository($this->connection))->findByName($this->virtualHostId, 'test_durable_exchange');
+            $queue = (new DestinationRepository($this->connection))->findByName($this->virtualHostId, 'test_durable_queue');
+            self::assertNotNull($source);
+            self::assertNotNull($queue);
+            self::assertTrue($source->durable);
+            self::assertTrue($queue->durable);
+            self::assertCount(
+                1,
+                (new BindingRepository($this->connection))->findForRoute($this->virtualHostId, 'test_durable_exchange', 'created')
+            );
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(1, $this->tableCount('message_routes'));
+            self::assertSame(1, $this->tableCount('deliveries'));
+
+            $this->broker()->publish(new PublishRequest('/', 'test_durable_exchange', 'created', 'after-restart'));
+
+            self::assertSame(2, $this->tableCount('messages'));
+            self::assertSame(2, $this->tableCount('message_routes'));
+            self::assertSame(2, $this->tableCount('deliveries'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
     }
 
     public function testIncompatibleDirectFanoutRedeclarationClosesChannel(): void
@@ -586,16 +868,53 @@ final class AmqpTopologyTest extends TestCase
         self::assertSame([20, 11], $this->readMethod($listener, $client));
     }
 
-    private function queueDeclare(string $queue, bool $durable): string
+    private function queueDeclare(
+        string $queue,
+        bool $durable,
+        bool $passive = false,
+        bool $exclusive = false,
+        bool $autoDelete = false
+    ): string
     {
-        $bits = $durable ? 0b00000010 : 0;
+        $bits = 0;
+        if ($passive) {
+            $bits |= 0b00000001;
+        }
+        if ($durable) {
+            $bits |= 0b00000010;
+        }
+        if ($exclusive) {
+            $bits |= 0b00000100;
+        }
+        if ($autoDelete) {
+            $bits |= 0b00001000;
+        }
 
         return pack('n', 0) . $this->shortString($queue) . chr($bits) . pack('N', 0);
     }
 
-    private function exchangeDeclare(string $exchange, string $type, bool $durable = false): string
+    private function exchangeDeclare(
+        string $exchange,
+        string $type,
+        bool $durable = false,
+        bool $passive = false,
+        bool $autoDelete = false,
+        bool $internal = false
+    ): string
     {
-        $bits = $durable ? 0b00000010 : 0;
+        $bits = 0;
+        if ($passive) {
+            $bits |= 0b00000001;
+        }
+        if ($durable) {
+            $bits |= 0b00000010;
+        }
+        if ($autoDelete) {
+            $bits |= 0b00000100;
+        }
+        if ($internal) {
+            $bits |= 0b00001000;
+        }
 
         return pack('n', 0) . $this->shortString($exchange) . $this->shortString($type) . chr($bits) . pack('N', 0);
     }

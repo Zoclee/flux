@@ -79,6 +79,19 @@ final class ConsumerRegistry
         return count($this->consumers);
     }
 
+    public function countByDestination(string $virtualHost, string $destination): int
+    {
+        $count = 0;
+
+        foreach ($this->consumers as $consumer) {
+            if ($consumer->virtualHost === $virtualHost && $consumer->destination === $destination) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
     public function clear(): void
     {
         $this->consumers = [];

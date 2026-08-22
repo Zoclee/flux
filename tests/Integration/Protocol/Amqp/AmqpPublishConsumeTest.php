@@ -219,6 +219,70 @@ final class AmqpPublishConsumeTest extends TestCase
         }
     }
 
+    public function testPassiveDurableQueueDeclareReportsPersistentMessageDepthBeforeAndAfterAcknowledgement(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('test_durable_queue', durable: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            foreach (['one', 'two', 'three'] as $body) {
+                $this->publishBody($listener, $client, 1, '', 'test_durable_queue', $body);
+            }
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('test_durable_queue', passive: true, durable: false));
+            $declareOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 11], $declareOk->method());
+            self::assertSame(3, $this->queueDeclareMessageCount($declareOk));
+
+            for ($i = 0; $i < 3; $i++) {
+                $this->sendMethod($client, 1, 60, 70, $this->basicGet('test_durable_queue'));
+                $getOk = $this->readMethodFrame($listener, $client);
+                self::assertSame([60, 71], $getOk->method());
+                $deliveryTag = $this->deliveryTagFromBasicGetOk($getOk);
+                self::assertSame(Frame::TYPE_HEADER, $this->readFrame($listener, $client)->type);
+                self::assertSame(Frame::TYPE_BODY, $this->readFrame($listener, $client)->type);
+                $this->sendMethod($client, 1, 60, 80, $this->packLongLong($deliveryTag) . "\x00");
+                $listener->tick();
+            }
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('test_durable_queue', passive: true, durable: false));
+            $declareOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 11], $declareOk->method());
+            self::assertSame(0, $this->queueDeclareMessageCount($declareOk));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testPassiveQueueDeclareOkReportsConsumerCount(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders', passive: true));
+            $declareOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 11], $declareOk->method());
+            self::assertSame(1, $this->queueDeclareConsumerCount($declareOk));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testRoutableMandatoryPublishWithConfirmsIsAcknowledged(): void
     {
         [$listener, $client] = $this->startedListener();
@@ -2059,11 +2123,26 @@ final class AmqpPublishConsumeTest extends TestCase
         fwrite($client, (new FrameCodec())->encode(Frame::methodFrame($channel, $classId, $methodId, $arguments)));
     }
 
-    private function queueDeclare(string $queue, bool $passive = false): string
+    private function queueDeclare(
+        string $queue,
+        bool $passive = false,
+        bool $durable = true,
+        bool $exclusive = false,
+        bool $autoDelete = false
+    ): string
     {
-        $bits = 0b00000010;
+        $bits = 0;
         if ($passive) {
             $bits |= 0b00000001;
+        }
+        if ($durable) {
+            $bits |= 0b00000010;
+        }
+        if ($exclusive) {
+            $bits |= 0b00000100;
+        }
+        if ($autoDelete) {
+            $bits |= 0b00001000;
         }
 
         return pack('n', 0) . $this->shortString($queue) . chr($bits) . pack('N', 0);
@@ -2311,6 +2390,15 @@ final class AmqpPublishConsumeTest extends TestCase
     {
         $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
         $reader->readShortString();
+
+        return $reader->readLong();
+    }
+
+    private function queueDeclareConsumerCount(Frame $frame): int
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readShortString();
+        $reader->readLong();
 
         return $reader->readLong();
     }
