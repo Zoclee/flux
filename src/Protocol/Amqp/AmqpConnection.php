@@ -6,6 +6,8 @@ namespace Flux\Protocol\Amqp;
 
 use DateTimeImmutable;
 use Flux\Broker\AcknowledgeRequest;
+use Flux\Broker\AuthenticatedUser;
+use Flux\Broker\AuthenticationService;
 use Flux\Broker\Broker;
 use Flux\Broker\Delivery;
 use Flux\Broker\Message;
@@ -36,6 +38,8 @@ final class AmqpConnection
     private int $negotiatedHeartbeat;
     private int $lastReceivedAt;
     private int $lastSentAt;
+    private ?AuthenticatedUser $authenticatedUser = null;
+    private ?string $virtualHost = null;
 
     /**
      * @var callable(): int
@@ -95,6 +99,7 @@ final class AmqpConnection
         private readonly ConnectionRegistry $connections,
         private readonly int $maxFrameSize = 131072,
         private readonly ?Broker $broker = null,
+        private readonly ?AuthenticationService $authenticator = null,
         ?ConsumerRegistry $consumers = null,
         private readonly int $maxMessageSize = 10485760,
         private readonly int $heartbeatInterval = 60,
@@ -133,6 +138,9 @@ final class AmqpConnection
 
             try {
                 $this->receive($bytes);
+                if ($this->state === AmqpConnectionState::Closed || !is_resource($this->socket)) {
+                    return;
+                }
             } catch (ProtocolException) {
                 $this->close();
                 return;
@@ -269,6 +277,9 @@ final class AmqpConnection
         }
 
         if ($this->state === AmqpConnectionState::Starting && $classId === 10 && $methodId === 11) {
+            if (!$this->handleStartOk($frame)) {
+                return;
+            }
             $this->state = AmqpConnectionState::Tuning;
             $this->writeFrame($this->connectionTune());
             return;
@@ -281,6 +292,9 @@ final class AmqpConnection
         }
 
         if ($this->state === AmqpConnectionState::Opening && $classId === 10 && $methodId === 40) {
+            if (!$this->handleConnectionOpen($frame)) {
+                return;
+            }
             $this->state = AmqpConnectionState::Open;
             $this->writeFrame($this->connectionOpenOk());
             return;
@@ -362,6 +376,84 @@ final class AmqpConnection
         }
     }
 
+    private function handleStartOk(Frame $frame): bool
+    {
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $reader->skipTable();
+        $mechanism = $reader->readShortString();
+        $response = $reader->readLongString();
+        $reader->readShortString();
+        $reader->assertComplete();
+
+        if ($mechanism !== 'PLAIN') {
+            $this->sendConnectionClose(503, 'COMMAND_INVALID - unsupported SASL mechanism', 10, 11);
+            return false;
+        }
+
+        $credentials = $this->parsePlainResponse($response);
+        if ($credentials === null) {
+            $this->sendConnectionClose(501, 'FRAME_ERROR - malformed SASL response', 10, 11);
+            return false;
+        }
+
+        [$authzid, $username, $password] = $credentials;
+        if ($authzid !== '' && $authzid !== $username) {
+            $this->sendConnectionClose(403, 'ACCESS_REFUSED - authorization identity is not supported', 10, 11);
+            return false;
+        }
+
+        $result = $this->authenticator()->authenticate($username, $password);
+        if (!$result->authenticated || $result->user === null) {
+            $this->sendConnectionClose(403, 'ACCESS_REFUSED - authentication failed', 10, 11);
+            return false;
+        }
+
+        $this->authenticatedUser = $result->user;
+
+        return true;
+    }
+
+    private function handleConnectionOpen(Frame $frame): bool
+    {
+        if ($this->authenticatedUser === null) {
+            $this->sendConnectionClose(403, 'ACCESS_REFUSED - authentication required', 10, 40);
+            return false;
+        }
+
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $virtualHost = $reader->readShortString();
+        $reader->readShortString();
+        $reader->readOctet();
+        $reader->assertComplete();
+
+        if ($virtualHost === '') {
+            $this->sendConnectionClose(530, 'NOT_ALLOWED - virtual host is required', 10, 40);
+            return false;
+        }
+
+        if (!$this->authenticator()->canAccessVirtualHost($this->authenticatedUser, $virtualHost)) {
+            $this->sendConnectionClose(530, 'NOT_ALLOWED - virtual host access refused', 10, 40);
+            return false;
+        }
+
+        $this->virtualHost = $virtualHost;
+
+        return true;
+    }
+
+    /**
+     * @return null|array{0: string, 1: string, 2: string}
+     */
+    private function parsePlainResponse(string $response): ?array
+    {
+        $parts = explode("\0", $response);
+        if (count($parts) !== 3 || $parts[1] === '') {
+            return null;
+        }
+
+        return [$parts[0], $parts[1], $parts[2]];
+    }
+
     private function handleBasicQos(Frame $frame): void
     {
         $reader = new AmqpMethodReader(substr($frame->payload, 4));
@@ -417,7 +509,7 @@ final class AmqpConnection
             throw new TopologyException('Exclusive queues are not supported yet.', TopologyException::NOT_IMPLEMENTED);
         }
 
-        $destination = $this->broker()->declareQueue('/', $queue, $durable, $autoDelete, $passive);
+        $destination = $this->broker()->declareQueue($this->openedVirtualHost(), $queue, $durable, $autoDelete, $passive);
 
         if (!$noWait) {
             $this->writeFrame(Frame::methodFrame(
@@ -456,7 +548,7 @@ final class AmqpConnection
             throw new TopologyException('Internal exchanges are not supported yet.', TopologyException::NOT_IMPLEMENTED);
         }
 
-        $this->broker()->declareDirectRoutingSource('/', $exchange, $durable, $autoDelete, $passive);
+        $this->broker()->declareDirectRoutingSource($this->openedVirtualHost(), $exchange, $durable, $autoDelete, $passive);
 
         if (!$noWait) {
             $this->writeFrame(Frame::methodFrame($frame->channel, 40, 11));
@@ -475,7 +567,7 @@ final class AmqpConnection
         $reader->skipTable();
         $reader->assertComplete();
 
-        $this->broker()->bindQueue('/', $exchange, $queue, $routingKey);
+        $this->broker()->bindQueue($this->openedVirtualHost(), $exchange, $queue, $routingKey);
 
         if (!$noWait) {
             $this->writeFrame(Frame::methodFrame($frame->channel, 50, 21));
@@ -533,10 +625,10 @@ final class AmqpConnection
             throw new TopologyException(sprintf('Consumer tag "%s" is already active.', $consumerTag), TopologyException::PRECONDITION_FAILED);
         }
 
-        $this->broker()->ensureQueueSubscription('/', $queue, 'amqp');
+        $this->broker()->ensureQueueSubscription($this->openedVirtualHost(), $queue, 'amqp');
         $consumer = RuntimeConsumer::create(
             $this->runtimeConnection->id,
-            '/',
+            $this->openedVirtualHost(),
             $queue,
             'amqp',
             ['protocol' => 'amqp-0-9-1', 'channel' => $frame->channel, 'consumer_tag' => $consumerTag]
@@ -721,7 +813,7 @@ final class AmqpConnection
         if ($publish['exchange'] === '') {
             try {
                 $this->broker()->publishToDefaultExchange(
-                    '/',
+                    $this->openedVirtualHost(),
                     $publish['routing_key'],
                     $publish['body'],
                     $properties['headers'] ?? [],
@@ -742,7 +834,7 @@ final class AmqpConnection
 
         try {
             $this->broker()->publish(new PublishRequest(
-                '/',
+                $this->openedVirtualHost(),
                 $publish['exchange'],
                 $publish['routing_key'],
                 $publish['body'],
@@ -1018,6 +1110,16 @@ final class AmqpConnection
         return $this->broker ?? throw new RuntimeException('AMQP topology operations require a broker.');
     }
 
+    private function authenticator(): AuthenticationService
+    {
+        return $this->authenticator ?? throw new RuntimeException('AMQP authentication requires an authenticator.');
+    }
+
+    private function openedVirtualHost(): string
+    {
+        return $this->virtualHost ?? throw new ProtocolException('AMQP connection has not opened a virtual host.');
+    }
+
     private function sendChannelError(int $channel, int $replyCode, string $replyText, int $classId, int $methodId): void
     {
         $this->closeChannel($channel);
@@ -1027,6 +1129,18 @@ final class AmqpConnection
             40,
             pack('n', $replyCode) . $this->shortString($this->truncateReplyText($replyText)) . pack('nn', $classId, $methodId)
         ));
+    }
+
+    private function sendConnectionClose(int $replyCode, string $replyText, int $classId, int $methodId): void
+    {
+        $this->writeFrame(Frame::methodFrame(
+            0,
+            10,
+            50,
+            pack('n', $replyCode) . $this->shortString($this->truncateReplyText($replyText)) . pack('nn', $classId, $methodId)
+        ));
+        fflush($this->socket);
+        $this->close();
     }
 
     private function negotiateHeartbeat(Frame $frame): void

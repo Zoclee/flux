@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Flux\Tests\Unit\Protocol\Amqp;
 
+use Flux\Broker\AuthenticatedUser;
+use Flux\Broker\AuthenticationResult;
+use Flux\Broker\AuthenticationService;
 use Flux\Protocol\Amqp\AmqpConnection;
 use Flux\Protocol\Amqp\AmqpConnectionState;
 use Flux\Protocol\Amqp\Frame;
@@ -53,14 +56,14 @@ final class AmqpConnectionTest extends TestCase
         $codec = new FrameCodec();
 
         $connection->receive(AmqpConnection::PROTOCOL_HEADER);
-        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11)));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11, $this->startOk())));
         self::assertSame(AmqpConnectionState::Tuning, $connection->state());
 
         $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(60))));
         self::assertSame(AmqpConnectionState::Opening, $connection->state());
         self::assertSame(60, $connection->negotiatedHeartbeatInterval());
 
-        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 40)));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 40, $this->connectionOpen('/'))));
         self::assertSame(AmqpConnectionState::Open, $connection->state());
 
         self::assertSame([[10, 10], [10, 30], [10, 41]], $this->writtenMethods($socket));
@@ -149,7 +152,7 @@ final class AmqpConnectionTest extends TestCase
         $codec = new FrameCodec();
 
         $connection->receive(AmqpConnection::PROTOCOL_HEADER);
-        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11)));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11, $this->startOk())));
         $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(10))));
 
         self::assertSame(10, $connection->negotiatedHeartbeatInterval());
@@ -162,10 +165,65 @@ final class AmqpConnectionTest extends TestCase
         $codec = new FrameCodec();
 
         $connection->receive(AmqpConnection::PROTOCOL_HEADER);
-        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11)));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11, $this->startOk())));
         $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(0))));
 
         self::assertSame(0, $connection->negotiatedHeartbeatInterval());
+    }
+
+    public function testMalformedPlainResponseClosesConnectionBeforeTune(): void
+    {
+        [$connection, $peer] = $this->connectionPair();
+        $codec = new FrameCodec();
+
+        $connection->receive(AmqpConnection::PROTOCOL_HEADER);
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11, $this->startOk(response: 'guest'))));
+
+        self::assertSame(AmqpConnectionState::Closed, $connection->state());
+        self::assertSame([[10, 10], [10, 50]], $this->readableWrittenMethods($peer));
+    }
+
+    public function testUnsupportedSaslMechanismClosesConnectionBeforeTune(): void
+    {
+        [$connection, $peer] = $this->connectionPair();
+        $codec = new FrameCodec();
+
+        $connection->receive(AmqpConnection::PROTOCOL_HEADER);
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11, $this->startOk(mechanism: 'AMQPLAIN'))));
+
+        self::assertSame(AmqpConnectionState::Closed, $connection->state());
+        self::assertSame([[10, 10], [10, 50]], $this->readableWrittenMethods($peer));
+    }
+
+    public function testInvalidCredentialsCloseConnectionBeforeTune(): void
+    {
+        [$connection, $peer] = $this->connectionPair();
+        $codec = new FrameCodec();
+
+        $connection->receive(AmqpConnection::PROTOCOL_HEADER);
+        $connection->receive($codec->encode(Frame::methodFrame(
+            0,
+            10,
+            11,
+            $this->startOk(response: "\0guest\0wrong")
+        )));
+
+        self::assertSame(AmqpConnectionState::Closed, $connection->state());
+        self::assertSame([[10, 10], [10, 50]], $this->readableWrittenMethods($peer));
+    }
+
+    public function testUnauthorizedVirtualHostNeverReceivesOpenOk(): void
+    {
+        [$connection, $peer] = $this->connectionPair();
+        $codec = new FrameCodec();
+
+        $connection->receive(AmqpConnection::PROTOCOL_HEADER);
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11, $this->startOk())));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(60))));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 40, $this->connectionOpen('tenant-a'))));
+
+        self::assertSame(AmqpConnectionState::Closed, $connection->state());
+        self::assertSame([[10, 10], [10, 30], [10, 50]], $this->readableWrittenMethods($peer));
     }
 
     public function testMalformedHeartbeatFrameIsRejected(): void
@@ -187,7 +245,44 @@ final class AmqpConnectionTest extends TestCase
         $socket = fopen('php://temp', 'w+');
         self::assertIsResource($socket);
 
-        return [new AmqpConnection($socket, new ConnectionRegistry(), heartbeatInterval: $heartbeatInterval), $socket];
+        return [
+            new AmqpConnection(
+                $socket,
+                new ConnectionRegistry(),
+                authenticator: new InMemoryAuthenticationService(),
+                heartbeatInterval: $heartbeatInterval
+            ),
+            $socket,
+        ];
+    }
+
+    /**
+     * @return array{0: AmqpConnection, 1: resource}
+     */
+    private function connectionPair(): array
+    {
+        $server = stream_socket_server('tcp://127.0.0.1:0', $errorCode, $errorMessage);
+        self::assertIsResource($server, sprintf('Could not create test socket server: %s (%d)', $errorMessage, $errorCode));
+
+        $address = stream_socket_get_name($server, false);
+        self::assertIsString($address);
+
+        $peer = stream_socket_client('tcp://' . $address);
+        self::assertIsResource($peer);
+
+        $socket = stream_socket_accept($server, 1);
+        fclose($server);
+        self::assertIsResource($socket);
+        stream_set_blocking($peer, false);
+
+        return [
+            new AmqpConnection(
+                $socket,
+                new ConnectionRegistry(),
+                authenticator: new InMemoryAuthenticationService()
+            ),
+            $peer,
+        ];
     }
 
     /**
@@ -209,19 +304,68 @@ final class AmqpConnectionTest extends TestCase
         return $methods;
     }
 
+    /**
+     * @param resource $socket
+     * @return list<array{0: int, 1: int}>
+     */
+    private function readableWrittenMethods(mixed $socket): array
+    {
+        $bytes = '';
+        while (!feof($socket)) {
+            $chunk = fread($socket, 8192);
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            $bytes .= $chunk;
+        }
+
+        $methods = [];
+        $codec = new FrameCodec();
+        foreach ($codec->push($bytes) as $frame) {
+            $methods[] = $frame->method();
+        }
+
+        return $methods;
+    }
+
     private function completeHandshake(AmqpConnection $connection): void
     {
         $codec = new FrameCodec();
         $connection->receive(AmqpConnection::PROTOCOL_HEADER);
-        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11)));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11, $this->startOk())));
         $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(60))));
-        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 40)));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 40, $this->connectionOpen('/'))));
         self::assertSame(AmqpConnectionState::Open, $connection->state());
+    }
+
+    private function startOk(string $mechanism = 'PLAIN', ?string $response = null): string
+    {
+        $response ??= "\0guest\0guest";
+
+        return pack('N', 0)
+            . $this->shortString($mechanism)
+            . $this->longString($response)
+            . $this->shortString('en_US');
+    }
+
+    private function connectionOpen(string $virtualHost): string
+    {
+        return $this->shortString($virtualHost) . $this->shortString('') . "\x00";
     }
 
     private function tuneOk(int $heartbeat): string
     {
         return pack('nNn', 0, 131072, $heartbeat);
+    }
+
+    private function shortString(string $value): string
+    {
+        return chr(strlen($value)) . $value;
+    }
+
+    private function longString(string $value): string
+    {
+        return pack('N', strlen($value)) . $value;
     }
 
     /**
@@ -244,5 +388,22 @@ final class AmqpConnectionTest extends TestCase
         }
 
         self::fail('connection.tune was not written.');
+    }
+}
+
+final readonly class InMemoryAuthenticationService implements AuthenticationService
+{
+    public function authenticate(string $username, string $password): AuthenticationResult
+    {
+        if ($username !== 'guest' || $password !== 'guest') {
+            return AuthenticationResult::failure();
+        }
+
+        return AuthenticationResult::success(new AuthenticatedUser(1, 'guest'));
+    }
+
+    public function canAccessVirtualHost(AuthenticatedUser $user, string $virtualHost): bool
+    {
+        return $virtualHost === '/';
     }
 }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Flux\Console\Commands;
 
 use Flux\Broker\Broker;
+use Flux\Broker\Authenticator;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\ConnectionConfig;
 use Flux\Persistence\Postgres\DeliveryRepository;
@@ -15,6 +16,7 @@ use Flux\Persistence\Postgres\PublishTransaction;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\RoutingSourceRepository;
 use Flux\Persistence\Postgres\SubscriptionRepository;
+use Flux\Persistence\Postgres\UserRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
 use Flux\Protocol\Amqp\AmqpListener;
 use Flux\Runtime\BrokerRuntime;
@@ -77,6 +79,7 @@ final class ServerStartCommand
         try {
             $connection = Connection::fromConfig($this->config);
             $connection->pdo();
+            $authenticator = new Authenticator(new UserRepository($connection));
 
             $broker = new Broker(
                 new VirtualHostRepository($connection),
@@ -91,7 +94,7 @@ final class ServerStartCommand
             );
             $connections = new ConnectionRegistry();
             $consumers = new ConsumerRegistry();
-            $runtime = $this->createRuntime($broker, $connections, $consumers);
+            $runtime = $this->createRuntime($broker, $authenticator, $connections, $consumers);
         } catch (Throwable $exception) {
             $this->write($output, "Database: disconnected\n\n");
             $this->write($output, sprintf("ERROR: %s\n", $this->config->redact($exception->getMessage())));
@@ -155,6 +158,7 @@ final class ServerStartCommand
 
     private function createRuntime(
         Broker $broker,
+        Authenticator $authenticator,
         ConnectionRegistry $connections,
         ConsumerRegistry $consumers
     ): BrokerRuntime {
@@ -172,6 +176,7 @@ final class ServerStartCommand
                     $this->amqpHost,
                     $this->amqpPort,
                     broker: $broker,
+                    authenticator: $authenticator,
                     consumers: $consumers,
                     heartbeatInterval: $this->amqpHeartbeat
                 ),

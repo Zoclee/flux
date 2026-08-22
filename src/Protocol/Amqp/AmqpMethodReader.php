@@ -63,6 +63,16 @@ final class AmqpMethodReader
         return $value;
     }
 
+    public function readLongString(): string
+    {
+        $length = $this->readLong();
+        $this->requireBytes($length);
+        $value = substr($this->payload, $this->offset, $length);
+        $this->offset += $length;
+
+        return $value;
+    }
+
     public function skipTable(): void
     {
         $this->requireBytes(4);
@@ -106,16 +116,6 @@ final class AmqpMethodReader
         }
 
         return $table;
-    }
-
-    public function readLongString(): string
-    {
-        $length = $this->readLong();
-        $this->requireBytes($length);
-        $value = substr($this->payload, $this->offset, $length);
-        $this->offset += $length;
-
-        return $value;
     }
 
     public function assertComplete(): void

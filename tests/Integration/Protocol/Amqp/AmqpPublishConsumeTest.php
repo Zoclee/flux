@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Flux\Tests\Integration\Protocol\Amqp;
 
 use Flux\Broker\Broker;
+use Flux\Broker\Authenticator;
 use Flux\Broker\DeliveryState;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\Connection;
@@ -16,6 +17,7 @@ use Flux\Persistence\Postgres\Migrator;
 use Flux\Persistence\Postgres\PublishTransaction;
 use Flux\Persistence\Postgres\RoutingSourceRepository;
 use Flux\Persistence\Postgres\SubscriptionRepository;
+use Flux\Persistence\Postgres\UserRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
 use Flux\Protocol\Amqp\AmqpConnection;
 use Flux\Protocol\Amqp\AmqpListener;
@@ -57,6 +59,9 @@ final class AmqpPublishConsumeTest extends TestCase
         (new Migrator($this->connection, dirname(__DIR__, 4) . '/database/migrations'))->migrate();
         $this->virtualHostId = (new VirtualHostRepository($this->connection))->findByName('/')?->id
             ?? throw new \RuntimeException('Default virtual host was not created by migrations.');
+        $users = new UserRepository($this->connection);
+        $users->create('guest', 'guest');
+        $users->grantVirtualHost('guest', '/');
     }
 
     public function testDefaultExchangePublishConsumeAndAckPreservesBinaryBodyAndProperties(): void
@@ -105,6 +110,46 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame($payload, $message->payload);
         self::assertSame('application/octet-stream', $message->contentType);
         self::assertSame(7, $message->priority);
+    }
+
+    public function testInvalidCredentialsNeverReceiveOpenOkAndCleanRuntimeConnection(): void
+    {
+        $connections = new ConnectionRegistry();
+        [$listener, $client] = $this->startedListener($connections);
+
+        try {
+            fwrite($client, AmqpConnection::PROTOCOL_HEADER);
+            self::assertSame([10, 10], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 0, 10, 11, $this->startOk("\0guest\0wrong"));
+
+            self::assertSame([10, 50], $this->readMethod($listener, $client));
+            self::assertSame(0, $connections->count());
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testUnknownVirtualHostNeverReceivesOpenOkAndCleanRuntimeConnection(): void
+    {
+        $connections = new ConnectionRegistry();
+        [$listener, $client] = $this->startedListener($connections);
+
+        try {
+            fwrite($client, AmqpConnection::PROTOCOL_HEADER);
+            self::assertSame([10, 10], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 0, 10, 11, $this->startOk());
+            self::assertSame([10, 30], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 0, 10, 31, $this->tuneOk(60));
+            $listener->tick();
+            $this->sendMethod($client, 0, 10, 40, $this->connectionOpen('missing'));
+
+            self::assertSame([10, 50], $this->readMethod($listener, $client));
+            self::assertSame(0, $connections->count());
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
     }
 
     public function testDirectExchangeRejectWithRequeueRedeliversThenRejects(): void
@@ -191,6 +236,7 @@ final class AmqpPublishConsumeTest extends TestCase
             '127.0.0.1',
             0,
             broker: $this->broker(),
+            authenticator: $this->authenticator(),
             consumers: $consumers,
             heartbeatInterval: 1,
             clock: static function () use (&$now): int {
@@ -469,6 +515,7 @@ final class AmqpPublishConsumeTest extends TestCase
             '127.0.0.1',
             0,
             broker: $this->broker(),
+            authenticator: $this->authenticator(),
             consumers: new ConsumerRegistry()
         );
         $listener->start();
@@ -752,13 +799,14 @@ final class AmqpPublishConsumeTest extends TestCase
     /**
      * @return array{0: AmqpListener, 1: resource}
      */
-    private function startedListener(): array
+    private function startedListener(?ConnectionRegistry $connections = null): array
     {
         $listener = new AmqpListener(
-            new ConnectionRegistry(),
+            $connections ?? new ConnectionRegistry(),
             '127.0.0.1',
             0,
             broker: $this->broker(),
+            authenticator: $this->authenticator(),
             consumers: new ConsumerRegistry()
         );
         $listener->start();
@@ -777,11 +825,11 @@ final class AmqpPublishConsumeTest extends TestCase
         $codec = new FrameCodec();
         fwrite($client, AmqpConnection::PROTOCOL_HEADER);
         self::assertSame([10, 10], $this->readMethod($listener, $client));
-        $this->sendMethod($client, 0, 10, 11);
+        $this->sendMethod($client, 0, 10, 11, $this->startOk());
         self::assertSame([10, 30], $this->readMethod($listener, $client));
         $this->sendMethod($client, 0, 10, 31, $this->tuneOk($heartbeat));
         $listener->tick();
-        $this->sendMethod($client, 0, 10, 40);
+        $this->sendMethod($client, 0, 10, 40, $this->connectionOpen('/'));
         self::assertSame([10, 41], $this->readMethod($listener, $client));
         fwrite($client, $codec->encode(Frame::methodFrame($channel, 20, 10, "\x00")));
         self::assertSame([20, 11], $this->readMethod($listener, $client));
@@ -928,6 +976,26 @@ final class AmqpPublishConsumeTest extends TestCase
         return chr(strlen($value)) . $value;
     }
 
+    private function longString(string $value): string
+    {
+        return pack('N', strlen($value)) . $value;
+    }
+
+    private function startOk(?string $response = null): string
+    {
+        $response ??= "\0guest\0guest";
+
+        return pack('N', 0)
+            . $this->shortString('PLAIN')
+            . $this->longString($response)
+            . $this->shortString('en_US');
+    }
+
+    private function connectionOpen(string $virtualHost): string
+    {
+        return $this->shortString($virtualHost) . $this->shortString('') . "\x00";
+    }
+
     private function tuneOk(int $heartbeat): string
     {
         return pack('nNn', 0, 131072, $heartbeat);
@@ -1071,6 +1139,11 @@ final class AmqpPublishConsumeTest extends TestCase
             new MessageRouteRepository($this->connection),
             new MessageRepository($this->connection)
         );
+    }
+
+    private function authenticator(): Authenticator
+    {
+        return new Authenticator(new UserRepository($this->connection));
     }
 
     private function resetSchema(): void

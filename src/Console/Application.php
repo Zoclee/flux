@@ -16,7 +16,11 @@ use Flux\Console\Commands\QueueShowCommand;
 use Flux\Console\Commands\ReadOnlyDatabaseContext;
 use Flux\Console\Commands\ServerStartCommand;
 use Flux\Console\Commands\SubscriptionListCommand;
+use Flux\Console\Commands\UserCreateCommand;
+use Flux\Console\Commands\UserGrantVhostCommand;
+use Flux\Console\Commands\UserListCommand;
 use Flux\Console\Commands\VhostListCommand;
+use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\ConnectionConfig;
 use Flux\Runtime\RuntimeDiagnosticsClient;
 use Flux\Support\Dotenv;
@@ -50,6 +54,9 @@ final class Application
             'connection:list' => $this->runtimeCommand(ConnectionListCommand::class, $output),
             'consumer:list' => $this->runtimeCommand(ConsumerListCommand::class, $output),
             'broker:stats' => $this->brokerStats($output),
+            'user:create' => $this->userCreate(array_slice($argv, 2), $output),
+            'user:list' => $this->userList($output),
+            'user:grant-vhost' => $this->userGrantVhost(array_slice($argv, 2), $output),
             'vhost:list' => $this->readOnlyCommand(VhostListCommand::class, [], $output),
             'queue:list' => $this->readOnlyCommand(QueueListCommand::class, [], $output),
             'queue:show' => $this->readOnlyCommand(QueueShowCommand::class, array_slice($argv, 2), $output, true),
@@ -86,6 +93,9 @@ Server:
 
 Broker state:
   broker:stats          Show runtime and persistence statistics
+  user:create <user>    Create a broker user
+  user:list             List broker users
+  user:grant-vhost      Grant a user access to a virtual host
   vhost:list            List virtual hosts
   queue:list            List queues
   queue:show <queue>    Show queue details
@@ -235,6 +245,59 @@ HELP);
         }
 
         return (new BrokerStatsCommand($context, $this->diagnosticsClient($diagnosticsConfig)))->run($output);
+    }
+
+    /**
+     * @param list<string> $arguments
+     * @param resource $output
+     */
+    private function userCreate(array $arguments, mixed $output): int
+    {
+        try {
+            [, $config] = $this->projectContext();
+            $connection = Connection::fromConfig(ConnectionConfig::fromArray($config['database']));
+        } catch (Throwable $exception) {
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        return (new UserCreateCommand($connection))->run($arguments, $output);
+    }
+
+    /**
+     * @param resource $output
+     */
+    private function userList(mixed $output): int
+    {
+        try {
+            [, $config] = $this->projectContext();
+            $connection = Connection::fromConfig(ConnectionConfig::fromArray($config['database']));
+        } catch (Throwable $exception) {
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        return (new UserListCommand($connection))->run($output);
+    }
+
+    /**
+     * @param list<string> $arguments
+     * @param resource $output
+     */
+    private function userGrantVhost(array $arguments, mixed $output): int
+    {
+        try {
+            [, $config] = $this->projectContext();
+            $connection = Connection::fromConfig(ConnectionConfig::fromArray($config['database']));
+        } catch (Throwable $exception) {
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        return (new UserGrantVhostCommand($connection))->run($arguments, $output);
     }
 
     /**

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Flux\Tests\Integration\Protocol\Amqp;
 
 use Flux\Broker\Broker;
+use Flux\Broker\Authenticator;
 use Flux\Broker\DestinationType;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\Connection;
@@ -14,6 +15,7 @@ use Flux\Persistence\Postgres\Migrator;
 use Flux\Persistence\Postgres\PublishTransaction;
 use Flux\Persistence\Postgres\RoutingSourceRepository;
 use Flux\Persistence\Postgres\SubscriptionRepository;
+use Flux\Persistence\Postgres\UserRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
 use Flux\Protocol\Amqp\AmqpConnection;
 use Flux\Protocol\Amqp\AmqpListener;
@@ -49,6 +51,9 @@ final class AmqpTopologyTest extends TestCase
         (new Migrator($this->connection, dirname(__DIR__, 4) . '/database/migrations'))->migrate();
         $this->virtualHostId = (new VirtualHostRepository($this->connection))->findByName('/')?->id
             ?? throw new \RuntimeException('Default virtual host was not created by migrations.');
+        $users = new UserRepository($this->connection);
+        $users->create('guest', 'guest');
+        $users->grantVirtualHost('guest', '/');
     }
 
     public function testAmqpCanDeclareQueueExchangeBindAndCloseChannel(): void
@@ -137,7 +142,13 @@ final class AmqpTopologyTest extends TestCase
      */
     private function startedListener(): array
     {
-        $listener = new AmqpListener(new ConnectionRegistry(), '127.0.0.1', 0, broker: $this->broker());
+        $listener = new AmqpListener(
+            new ConnectionRegistry(),
+            '127.0.0.1',
+            0,
+            broker: $this->broker(),
+            authenticator: $this->authenticator()
+        );
         $listener->start();
         $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $listener->port()), $errorCode, $errorMessage, 1.0);
         self::assertIsResource($client, sprintf('Could not connect to AMQP listener: %s', $errorMessage));
@@ -154,11 +165,11 @@ final class AmqpTopologyTest extends TestCase
         $codec = new FrameCodec();
         fwrite($client, AmqpConnection::PROTOCOL_HEADER);
         self::assertSame([10, 10], $this->readMethod($listener, $client));
-        fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 11)));
+        fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 11, $this->startOk())));
         self::assertSame([10, 30], $this->readMethod($listener, $client));
         fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(60))));
         $listener->tick();
-        fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 40)));
+        fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 40, $this->connectionOpen('/'))));
         self::assertSame([10, 41], $this->readMethod($listener, $client));
         fwrite($client, $codec->encode(Frame::methodFrame($channel, 20, 10, "\x00")));
         self::assertSame([20, 11], $this->readMethod($listener, $client));
@@ -191,6 +202,29 @@ final class AmqpTopologyTest extends TestCase
     private function shortString(string $value): string
     {
         return chr(strlen($value)) . $value;
+    }
+
+    private function longString(string $value): string
+    {
+        return pack('N', strlen($value)) . $value;
+    }
+
+    private function startOk(): string
+    {
+        return pack('N', 0)
+            . $this->shortString('PLAIN')
+            . $this->longString("\0guest\0guest")
+            . $this->shortString('en_US');
+    }
+
+    private function connectionOpen(string $virtualHost): string
+    {
+        return $this->shortString($virtualHost) . $this->shortString('') . "\x00";
+    }
+
+    private function authenticator(): Authenticator
+    {
+        return new Authenticator(new UserRepository($this->connection));
     }
 
     private function tuneOk(int $heartbeat): string

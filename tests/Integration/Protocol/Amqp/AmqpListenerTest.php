@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Flux\Tests\Integration\Protocol\Amqp;
 
+use Flux\Broker\AuthenticatedUser;
+use Flux\Broker\AuthenticationResult;
+use Flux\Broker\AuthenticationService;
 use Flux\Protocol\Amqp\AmqpConnection;
 use Flux\Protocol\Amqp\AmqpListener;
 use Flux\Protocol\Amqp\Frame;
@@ -16,7 +19,7 @@ final class AmqpListenerTest extends TestCase
     public function testListenerCompletesConnectionHandshakeOverTcp(): void
     {
         $runtimeConnections = new ConnectionRegistry();
-        $listener = new AmqpListener($runtimeConnections, '127.0.0.1', 0);
+        $listener = new AmqpListener($runtimeConnections, '127.0.0.1', 0, authenticator: $this->authenticator());
         $listener->start();
 
         try {
@@ -62,6 +65,7 @@ final class AmqpListenerTest extends TestCase
             new ConnectionRegistry(),
             '127.0.0.1',
             0,
+            authenticator: $this->authenticator(),
             heartbeatInterval: 5,
             clock: static function () use (&$now): int {
                 return $now * 1_000_000_000;
@@ -96,6 +100,7 @@ final class AmqpListenerTest extends TestCase
             new ConnectionRegistry(),
             '127.0.0.1',
             0,
+            authenticator: $this->authenticator(),
             heartbeatInterval: 5,
             clock: static function () use (&$now): int {
                 return $now * 1_000_000_000;
@@ -132,6 +137,7 @@ final class AmqpListenerTest extends TestCase
             $connections,
             '127.0.0.1',
             0,
+            authenticator: $this->authenticator(),
             heartbeatInterval: 5,
             clock: static function () use (&$now): int {
                 return $now * 1_000_000_000;
@@ -235,16 +241,61 @@ final class AmqpListenerTest extends TestCase
         $codec = new FrameCodec();
         fwrite($client, AmqpConnection::PROTOCOL_HEADER);
         self::assertSame([10, 10], $this->readMethod($listener, $client));
-        fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 11)));
+        fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 11, $this->startOk())));
         self::assertSame([10, 30], $this->readMethod($listener, $client));
         fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk($heartbeat))));
         $listener->tick();
-        fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 40)));
+        fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 40, $this->connectionOpen('/'))));
         self::assertSame([10, 41], $this->readMethod($listener, $client));
     }
 
     private function tuneOk(int $heartbeat): string
     {
         return pack('nNn', 0, 131072, $heartbeat);
+    }
+
+    private function shortString(string $value): string
+    {
+        return chr(strlen($value)) . $value;
+    }
+
+    private function longString(string $value): string
+    {
+        return pack('N', strlen($value)) . $value;
+    }
+
+    private function startOk(): string
+    {
+        return pack('N', 0)
+            . $this->shortString('PLAIN')
+            . $this->longString("\0guest\0guest")
+            . $this->shortString('en_US');
+    }
+
+    private function connectionOpen(string $virtualHost): string
+    {
+        return $this->shortString($virtualHost) . $this->shortString('') . "\x00";
+    }
+
+    private function authenticator(): AuthenticationService
+    {
+        return new ListenerAuthenticationService();
+    }
+}
+
+final readonly class ListenerAuthenticationService implements AuthenticationService
+{
+    public function authenticate(string $username, string $password): AuthenticationResult
+    {
+        if ($username !== 'guest' || $password !== 'guest') {
+            return AuthenticationResult::failure();
+        }
+
+        return AuthenticationResult::success(new AuthenticatedUser(1, 'guest'));
+    }
+
+    public function canAccessVirtualHost(AuthenticatedUser $user, string $virtualHost): bool
+    {
+        return $virtualHost === '/';
     }
 }
