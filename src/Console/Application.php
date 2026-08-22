@@ -34,7 +34,7 @@ use Throwable;
 
 final class Application
 {
-    public const VERSION = '0.1.0-dev';
+    public const VERSION = '0.1.0';
 
     public function __construct(
         private readonly ?string $projectRoot = null
@@ -83,8 +83,8 @@ final class Application
      */
     private function showHelp(mixed $output): int
     {
-        $this->write($output, <<<'HELP'
-Flux 0.1.0-dev
+        $this->write($output, sprintf(<<<'HELP'
+Flux %s
 
 Usage:
   flux <command>
@@ -119,7 +119,7 @@ Broker state:
   subscription:list     List subscriptions
   message:peek <queue>  Inspect queued messages
 
-HELP);
+HELP, self::VERSION));
 
         return 0;
     }

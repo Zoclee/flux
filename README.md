@@ -44,13 +44,22 @@ Flux is currently at an MVP release-candidate stopping point. The first supporte
 ## Requirements
 
 - PHP 8.4 or newer
+- PHP extensions: `pdo`, `pdo_pgsql`, and `openssl`
 - Composer
 - PostgreSQL for integration tests and persistence work
 
 ## Installation
 
+From a source checkout:
+
 ```bash
 composer install
+```
+
+After the first public package is published, install the Composer binary with:
+
+```bash
+composer global require zoclee/flux
 ```
 
 ## CLI
@@ -187,7 +196,7 @@ FLUX_DB_HOST=127.0.0.1
 FLUX_DB_PORT=5432
 FLUX_DB_NAME=flux
 FLUX_DB_USER=flux
-FLUX_DB_PASSWORD=secret
+FLUX_DB_PASSWORD=
 ```
 
 Values already present in the process environment take precedence over `.env`.

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Flux\Tests\Integration\Runtime;
 
 use Flux\Broker\Broker;
+use Flux\Console\Application;
 use Flux\Console\Commands\ServerStartCommand;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\ConnectionConfig;
@@ -92,7 +93,7 @@ final class BrokerRuntimeIntegrationTest extends TestCase
 
         $command = new ServerStartCommand(
             $this->config,
-            '0.1.0-dev',
+            Application::VERSION,
             function (Broker $broker, ConnectionRegistry $connections, ConsumerRegistry $consumers): BrokerRuntime {
                 $runtime = null;
                 $runtime = new BrokerRuntime(
@@ -140,7 +141,7 @@ final class BrokerRuntimeIntegrationTest extends TestCase
 
         $command = new ServerStartCommand(
             $this->config,
-            '0.1.0-dev',
+            Application::VERSION,
             '127.0.0.1',
             5672,
             60,
@@ -186,7 +187,7 @@ final class BrokerRuntimeIntegrationTest extends TestCase
 
         $command = new ServerStartCommand(
             $this->config,
-            '0.1.0-dev',
+            Application::VERSION,
             '127.0.0.1',
             5672,
             60,

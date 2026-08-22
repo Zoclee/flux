@@ -14,7 +14,7 @@ final class ApplicationTest extends TestCase
         [$exitCode, $output] = $this->runApplication(['flux']);
 
         self::assertSame(0, $exitCode);
-        self::assertStringContainsString('Flux 0.1.0-dev', $output);
+        self::assertStringContainsString('Flux ' . Application::VERSION, $output);
         self::assertStringContainsString('Usage:', $output);
         self::assertStringContainsString('db:status', $output);
         self::assertStringContainsString('migrate', $output);
@@ -34,7 +34,7 @@ final class ApplicationTest extends TestCase
         [$exitCode, $output] = $this->runApplication(['flux', '--version']);
 
         self::assertSame(0, $exitCode);
-        self::assertSame("Flux 0.1.0-dev\n", $output);
+        self::assertSame("Flux " . Application::VERSION . "\n", $output);
     }
 
     public function testRootCliEntryPointExists(): void
