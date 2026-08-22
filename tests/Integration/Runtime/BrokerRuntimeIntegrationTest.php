@@ -119,7 +119,7 @@ final class BrokerRuntimeIntegrationTest extends TestCase
         self::assertStringContainsString('Flux Message Broker', $output);
         self::assertStringContainsString('Status:   starting', $output);
         self::assertStringContainsString('Database: connected', $output);
-        self::assertStringContainsString("Protocols:\n  none configured", $output);
+        self::assertStringContainsString("Protocols:\n  AMQP 0-9-1  127.0.0.1:5672", $output);
         self::assertStringContainsString('Runtime started.', $output);
         self::assertStringContainsString('Runtime stopped.', $output);
         self::assertSame($before, $this->brokerTableCounts());

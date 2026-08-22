@@ -10,8 +10,11 @@ use Flux\Persistence\Postgres\ConnectionConfig;
 use Flux\Persistence\Postgres\DeliveryRepository;
 use Flux\Persistence\Postgres\DestinationRepository;
 use Flux\Persistence\Postgres\PublishTransaction;
+use Flux\Persistence\Postgres\BindingRepository;
+use Flux\Persistence\Postgres\RoutingSourceRepository;
 use Flux\Persistence\Postgres\SubscriptionRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
+use Flux\Protocol\Amqp\AmqpListener;
 use Flux\Runtime\BrokerRuntime;
 use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
@@ -23,6 +26,8 @@ final class ServerStartCommand
      * @var null|callable(Broker, ConnectionRegistry, ConsumerRegistry): BrokerRuntime
      */
     private $runtimeFactory;
+    private string $amqpHost;
+    private int $amqpPort;
 
     /**
      * @param null|callable(Broker, ConnectionRegistry, ConsumerRegistry): BrokerRuntime $runtimeFactory
@@ -30,8 +35,18 @@ final class ServerStartCommand
     public function __construct(
         private readonly ConnectionConfig $config,
         private readonly string $version,
+        string|callable $amqpHost = '127.0.0.1',
+        int $amqpPort = 5672,
         ?callable $runtimeFactory = null
     ) {
+        if (is_callable($amqpHost)) {
+            $runtimeFactory = $amqpHost;
+            $amqpHost = '127.0.0.1';
+            $amqpPort = 5672;
+        }
+
+        $this->amqpHost = $amqpHost;
+        $this->amqpPort = $amqpPort;
         $this->runtimeFactory = $runtimeFactory;
     }
 
@@ -53,7 +68,9 @@ final class ServerStartCommand
                 new PublishTransaction($connection),
                 new DestinationRepository($connection),
                 new SubscriptionRepository($connection),
-                new DeliveryRepository($connection)
+                new DeliveryRepository($connection),
+                new BindingRepository($connection),
+                new RoutingSourceRepository($connection)
             );
             $connections = new ConnectionRegistry();
             $consumers = new ConsumerRegistry();
@@ -67,7 +84,7 @@ final class ServerStartCommand
 
         $this->write($output, "Database: connected\n\n");
         $this->write($output, "Protocols:\n");
-        $this->write($output, "  none configured\n\n");
+        $this->write($output, sprintf("  AMQP 0-9-1  %s:%d\n\n", $this->amqpHost, $this->amqpPort));
         $this->write($output, "Runtime started.\n");
         $this->write($output, "Press Ctrl+C to stop.\n");
 
@@ -118,7 +135,14 @@ final class ServerStartCommand
             return ($this->runtimeFactory)($broker, $connections, $consumers);
         }
 
-        return new BrokerRuntime($broker, $connections, $consumers);
+        return new BrokerRuntime(
+            $broker,
+            $connections,
+            $consumers,
+            components: [
+                new AmqpListener($connections, $this->amqpHost, $this->amqpPort, broker: $broker),
+            ]
+        );
     }
 
     /**

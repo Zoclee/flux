@@ -15,12 +15,16 @@ final class BrokerRuntime
     private int $tickCount = 0;
     private Closure $sleep;
 
+    /**
+     * @param list<RuntimeComponent> $components
+     */
     public function __construct(
         private readonly Broker $broker,
         private readonly ConnectionRegistry $connections,
         private readonly ConsumerRegistry $consumers,
         private readonly int $idleIntervalMicroseconds = 50000,
-        ?callable $sleep = null
+        ?callable $sleep = null,
+        private readonly array $components = []
     ) {
         if ($this->idleIntervalMicroseconds < 0) {
             throw new RuntimeException('Runtime idle interval must not be negative.');
@@ -40,6 +44,10 @@ final class BrokerRuntime
         }
 
         $this->state = RuntimeState::Starting;
+        foreach ($this->components as $component) {
+            $component->start();
+        }
+
         $this->state = RuntimeState::Running;
 
         try {
@@ -67,6 +75,10 @@ final class BrokerRuntime
         }
 
         $this->tickCount++;
+
+        foreach ($this->components as $component) {
+            $component->tick();
+        }
     }
 
     public function requestShutdown(): void
@@ -89,6 +101,10 @@ final class BrokerRuntime
         }
 
         $this->state = RuntimeState::Stopping;
+        foreach (array_reverse($this->components) as $component) {
+            $component->stop();
+        }
+
         $this->consumers->clear();
         $this->connections->clear();
         $this->state = RuntimeState::Stopped;

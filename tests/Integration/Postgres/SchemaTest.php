@@ -50,7 +50,7 @@ final class SchemaTest extends TestCase
     public function testEveryMigrationIsRecorded(): void
     {
         self::assertSame(
-            10,
+            11,
             (int) $this->pdo->query('SELECT count(*) FROM schema_migrations')->fetchColumn()
         );
     }
@@ -62,7 +62,7 @@ final class SchemaTest extends TestCase
         self::assertSame([], $result->applied);
 
         self::assertSame(
-            10,
+            11,
             (int) $this->pdo->query('SELECT count(*) FROM schema_migrations')->fetchColumn()
         );
         self::assertSame(
@@ -88,6 +88,7 @@ final class SchemaTest extends TestCase
                 '20260820_120007_create_deliveries',
                 '20260820_120008_enforce_binding_destination_virtual_host',
                 '20260820_120009_enforce_delivery_route_subscription_destination',
+                '20260820_120010_create_routing_sources',
             ],
             $statement->fetchAll(PDO::FETCH_COLUMN)
         );

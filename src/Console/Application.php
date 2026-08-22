@@ -168,6 +168,7 @@ HELP);
         try {
             [, $config] = $this->projectContext();
             $databaseConfig = ConnectionConfig::fromArray($config['database']);
+            $amqpConfig = $config['amqp'] ?? [];
         } catch (Throwable $exception) {
             $this->write($output, "Flux Message Broker\n\n");
             $this->write($output, "Status:   stopped\n\n");
@@ -176,7 +177,12 @@ HELP);
             return 1;
         }
 
-        return (new ServerStartCommand($databaseConfig, self::VERSION))->run($output);
+        return (new ServerStartCommand(
+            $databaseConfig,
+            self::VERSION,
+            (string) ($amqpConfig['host'] ?? '127.0.0.1'),
+            (int) ($amqpConfig['port'] ?? 5672)
+        ))->run($output);
     }
 
     /**
@@ -205,7 +211,7 @@ HELP);
     }
 
     /**
-     * @return array{0: string, 1: array{database: array<string, mixed>}}
+     * @return array{0: string, 1: array{database: array<string, mixed>, amqp?: array<string, mixed>}}
      */
     private function projectContext(): array
     {

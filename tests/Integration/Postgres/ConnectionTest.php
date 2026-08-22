@@ -136,7 +136,7 @@ SQL);
 
         $output = $this->runDbStatus();
 
-        self::assertStringContainsString('Migrations: 10 pending', $output);
+        self::assertStringContainsString('Migrations: 11 pending', $output);
         self::assertSame([], $this->pdo->query('SELECT version FROM schema_migrations')->fetchAll(PDO::FETCH_COLUMN));
     }
 

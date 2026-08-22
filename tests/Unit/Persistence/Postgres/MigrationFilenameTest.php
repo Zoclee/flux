@@ -51,6 +51,7 @@ final class MigrationFilenameTest extends TestCase
                 '20260820_120007_create_deliveries.sql',
                 '20260820_120008_enforce_binding_destination_virtual_host.sql',
                 '20260820_120009_enforce_delivery_route_subscription_destination.sql',
+                '20260820_120010_create_routing_sources.sql',
             ],
             Migrator::discoverMigrationFilenames(dirname(__DIR__, 4) . '/database/migrations')
         );

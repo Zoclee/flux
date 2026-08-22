@@ -33,6 +33,27 @@ SQL);
         return is_array($row) ? $this->mapRow($row) : null;
     }
 
+    public function findExact(int $virtualHostId, string $source, int $destinationId, string $routingKey): ?Binding
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT id, virtual_host_id, source, destination_id, routing_key, metadata, created_at
+FROM bindings
+WHERE virtual_host_id = :virtual_host_id
+  AND source = :source
+  AND destination_id = :destination_id
+  AND routing_key = :routing_key
+SQL);
+        $statement->bindValue('virtual_host_id', $virtualHostId, PDO::PARAM_INT);
+        $statement->bindValue('source', $source);
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->bindValue('routing_key', $routingKey);
+        $statement->execute();
+
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        return is_array($row) ? $this->mapRow($row) : null;
+    }
+
     /**
      * @param array<string, mixed> $metadata
      */

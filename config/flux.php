@@ -10,4 +10,8 @@ return [
         'user' => getenv('FLUX_DB_USER') ?: 'flux',
         'password' => getenv('FLUX_DB_PASSWORD') ?: null,
     ],
+    'amqp' => [
+        'host' => getenv('FLUX_AMQP_HOST') ?: '127.0.0.1',
+        'port' => (int) (getenv('FLUX_AMQP_PORT') ?: 5672),
+    ],
 ];

@@ -98,6 +98,24 @@ final class BrokerRuntimeTest extends TestCase
         self::assertSame(0, $consumers->count());
     }
 
+    public function testRuntimeStartsTicksAndStopsComponents(): void
+    {
+        $events = [];
+        $runtime = new BrokerRuntime(
+            $this->broker(),
+            new ConnectionRegistry(),
+            new ConsumerRegistry(),
+            0,
+            static function (): void {
+            },
+            [new RecordingRuntimeComponent($events)]
+        );
+
+        $runtime->run(maxIterations: 2);
+
+        self::assertSame(['start', 'tick', 'tick', 'stop'], $events);
+    }
+
     private function runtime(?callable $sleep = null): BrokerRuntime
     {
         return new BrokerRuntime(
@@ -121,5 +139,36 @@ final class BrokerRuntimeTest extends TestCase
             new SubscriptionRepository($connection),
             new DeliveryRepository($connection)
         );
+    }
+}
+
+final class RecordingRuntimeComponent implements \Flux\Runtime\RuntimeComponent
+{
+    /**
+     * @var list<string>
+     */
+    private array $events;
+
+    /**
+     * @param list<string> $events
+     */
+    public function __construct(array &$events)
+    {
+        $this->events = &$events;
+    }
+
+    public function start(): void
+    {
+        $this->events[] = 'start';
+    }
+
+    public function tick(): void
+    {
+        $this->events[] = 'tick';
+    }
+
+    public function stop(): void
+    {
+        $this->events[] = 'stop';
     }
 }

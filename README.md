@@ -2,7 +2,7 @@
 
 Flux is an unified message broker with PostgreSQL persistence.
 
-Flux is currently pre-MVP. Phase 2 development has begun with a protocol-neutral in-process Broker publish API over the PostgreSQL persistence layer. AMQP 0-9-1 compatibility, networking, runtime consumers, and other protocol adapters have not been implemented yet.
+Flux is currently pre-MVP. Phase 3.2 supports the first AMQP 0-9-1 network adapter: TCP connection handshake, runtime-only channels, queue declarations, direct exchange declarations, and exact queue bindings. Publishing, consuming, acknowledgements, production authentication, and advanced AMQP topology are not implemented yet.
 
 ## Requirements
 
@@ -67,7 +67,16 @@ The runtime can be started with:
 php flux server:start
 ```
 
-It verifies PostgreSQL connectivity, starts the in-memory runtime registries, and remains in the foreground until shutdown. No external messaging protocol listener is implemented yet, so the server reports that no protocols are configured. AMQP support remains future work.
+It verifies PostgreSQL connectivity, starts the in-memory runtime registries, starts the AMQP 0-9-1 listener, and remains in the foreground until shutdown.
+
+The AMQP listener defaults to `127.0.0.1:5672` and can be configured with:
+
+```text
+FLUX_AMQP_HOST
+FLUX_AMQP_PORT
+```
+
+AMQP authentication is a development placeholder only. The listener advertises `PLAIN` so basic clients can complete the connection handshake, but Flux does not yet implement production authentication, ACLs, or permissions.
 
 ### Database Migrations
 
