@@ -8,6 +8,7 @@ use DateTimeImmutable;
 use Flux\Broker\ResourcePermissionMatcher;
 use Flux\Broker\User;
 use Flux\Broker\UserPermissions;
+use Flux\Broker\VirtualHost;
 use PDO;
 use RuntimeException;
 
@@ -120,6 +121,28 @@ SQL);
         ]);
 
         return $statement->fetchColumn() !== false;
+    }
+
+    /**
+     * @return list<VirtualHost>
+     */
+    public function listVirtualHosts(int $userId): array
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT virtual_hosts.id,
+       virtual_hosts.name,
+       virtual_hosts.created_at
+FROM user_virtual_hosts
+INNER JOIN virtual_hosts ON virtual_hosts.id = user_virtual_hosts.virtual_host_id
+WHERE user_virtual_hosts.user_id = :user_id
+ORDER BY virtual_hosts.name
+SQL);
+        $statement->execute(['user_id' => $userId]);
+
+        return array_map(
+            fn (array $row): VirtualHost => $this->mapVirtualHostRow($row),
+            $statement->fetchAll(PDO::FETCH_ASSOC)
+        );
     }
 
     public function setPermissions(
@@ -298,6 +321,18 @@ SQL);
             $row['enabled'] === true || $row['enabled'] === 1 || $row['enabled'] === '1' || $row['enabled'] === 't',
             new DateTimeImmutable((string) $row['created_at']),
             new DateTimeImmutable((string) $row['updated_at'])
+        );
+    }
+
+    /**
+     * @param array{id: mixed, name: mixed, created_at: mixed} $row
+     */
+    private function mapVirtualHostRow(array $row): VirtualHost
+    {
+        return new VirtualHost(
+            (int) $row['id'],
+            (string) $row['name'],
+            new DateTimeImmutable((string) $row['created_at'])
         );
     }
 

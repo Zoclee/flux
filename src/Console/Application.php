@@ -24,6 +24,7 @@ use Flux\Console\Commands\UserClearPermissionsCommand;
 use Flux\Console\Commands\UserGrantVhostCommand;
 use Flux\Console\Commands\UserListCommand;
 use Flux\Console\Commands\UserListPermissionsCommand;
+use Flux\Console\Commands\UserListVhostsCommand;
 use Flux\Console\Commands\UserSetPermissionsCommand;
 use Flux\Console\Commands\VhostCreateCommand;
 use Flux\Console\Commands\VhostListCommand;
@@ -66,6 +67,7 @@ final class Application
             'user:create' => $this->userCreate(array_slice($argv, 2), $output),
             'user:list' => $this->userList($output),
             'user:grant-vhost' => $this->userGrantVhost(array_slice($argv, 2), $output),
+            'user:list-vhosts' => $this->userListVhosts(array_slice($argv, 2), $output),
             'user:set-permissions' => $this->userSetPermissions(array_slice($argv, 2), $output),
             'user:list-permissions' => $this->userListPermissions(array_slice($argv, 2), $output),
             'user:clear-permissions' => $this->userClearPermissions(array_slice($argv, 2), $output),
@@ -111,6 +113,7 @@ Broker state:
   user:create <user>    Create a broker user
   user:list             List broker users
   user:grant-vhost      Grant a user access to a virtual host
+  user:list-vhosts <username>    List virtual-host grants
   user:set-permissions  Set user permissions for a virtual host
   user:list-permissions List user permissions
   user:clear-permissions Clear user permissions for a virtual host
@@ -376,6 +379,24 @@ HELP, self::VERSION));
         }
 
         return (new UserGrantVhostCommand($connection))->run($arguments, $output);
+    }
+
+    /**
+     * @param list<string> $arguments
+     * @param resource $output
+     */
+    private function userListVhosts(array $arguments, mixed $output): int
+    {
+        try {
+            [, $config] = $this->projectContext();
+            $connection = Connection::fromConfig(ConnectionConfig::fromArray($config['database']));
+        } catch (Throwable $exception) {
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        return (new UserListVhostsCommand($connection))->run($arguments, $output);
     }
 
     /**

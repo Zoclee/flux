@@ -21,6 +21,7 @@ final class ApplicationTest extends TestCase
         self::assertStringContainsString('health', $output);
         self::assertStringContainsString('readiness', $output);
         self::assertStringContainsString('server:start', $output);
+        self::assertStringContainsString('user:list-vhosts <username>', $output);
         self::assertStringContainsString('vhost:create <name>', $output);
         self::assertStringContainsString('vhost:list', $output);
         self::assertStringContainsString('queue:list', $output);

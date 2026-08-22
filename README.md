@@ -81,6 +81,7 @@ php flux server:start
 php flux connection:list
 php flux consumer:list
 php flux broker:stats
+php flux user:list-vhosts test_user
 php flux vhost:create /development
 php flux vhost:list
 php flux queue:list
@@ -149,7 +150,7 @@ FLUX_AMQP_TLS_CA
 `FLUX_AMQP_HEARTBEAT` defaults to `60` seconds. Set it to `0` to disable heartbeat negotiation and timeout cleanup.
 Runtime diagnostics are exposed through a small read-only local socket used by `health`, `readiness`, `connection:list`, `consumer:list`, and `broker:stats`. It defaults to `127.0.0.1:5673` and does not expose credentials, message payloads, or mutation commands.
 
-Authentication uses persisted username/password credentials. Authorization uses persisted per-vhost `configure`, `write`, and `read` regex permissions.
+Authentication uses persisted username/password credentials. Users must be granted access to virtual hosts with `php flux user:grant-vhost <username> <vhost>`; inspect those grants with `php flux user:list-vhosts <username>`. Authorization uses separate persisted per-vhost `configure`, `write`, and `read` regex permissions.
 
 Resource limits and graceful shutdown can be configured with:
 

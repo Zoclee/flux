@@ -11,6 +11,7 @@ use Flux\Console\Commands\UserClearPermissionsCommand;
 use Flux\Console\Commands\UserGrantVhostCommand;
 use Flux\Console\Commands\UserListCommand;
 use Flux\Console\Commands\UserListPermissionsCommand;
+use Flux\Console\Commands\UserListVhostsCommand;
 use Flux\Console\Commands\UserSetPermissionsCommand;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\Migrator;
@@ -84,6 +85,78 @@ final class UserRepositoryTest extends TestCase
         self::assertTrue($authenticator->canAccessVirtualHost($result->user, '/'));
         self::assertFalse($authenticator->canAccessVirtualHost($result->user, 'tenant-a'));
         self::assertFalse($authenticator->canAccessVirtualHost($result->user, 'missing'));
+    }
+
+    public function testListVirtualHostsReturnsOneGrant(): void
+    {
+        $user = $this->users->create('alice', 'secret');
+        $this->users->grantVirtualHost('alice', '/');
+
+        self::assertSame(
+            ['/'],
+            array_map(static fn ($virtualHost): string => $virtualHost->name, $this->users->listVirtualHosts($user->id))
+        );
+    }
+
+    public function testListVirtualHostsReturnsMultipleGrantsInNameOrder(): void
+    {
+        $user = $this->users->create('alice', 'secret');
+        $virtualHosts = new VirtualHostRepository($this->connection);
+        $virtualHosts->create('/z');
+        $virtualHosts->create('/a');
+
+        $this->users->grantVirtualHost('alice', '/z');
+        $this->users->grantVirtualHost('alice', '/');
+        $this->users->grantVirtualHost('alice', '/a');
+
+        self::assertSame(
+            ['/', '/a', '/z'],
+            array_map(static fn ($virtualHost): string => $virtualHost->name, $this->users->listVirtualHosts($user->id))
+        );
+
+        [$exitCode, $output] = $this->runArgumentCommand(new UserListVhostsCommand($this->connection), ['alice']);
+
+        self::assertSame(0, $exitCode);
+        self::assertStringContainsString('3 virtual hosts.', $output);
+        self::assertLessThan(strpos($output, '/a'), strpos($output, '/'));
+        self::assertLessThan(strpos($output, '/z'), strpos($output, '/a'));
+    }
+
+    public function testListVhostsCommandHandlesNoGrantsAndUnknownUsersWithCorrectExitCodes(): void
+    {
+        $this->users->create('alice', 'secret');
+        $command = new UserListVhostsCommand($this->connection);
+
+        [$emptyExitCode, $emptyOutput] = $this->runArgumentCommand($command, ['alice']);
+        self::assertSame(0, $emptyExitCode);
+        self::assertSame("No virtual-host grants found for user \"alice\".\n", $emptyOutput);
+
+        [$missingExitCode, $missingOutput] = $this->runArgumentCommand($command, ['missing']);
+        self::assertSame(1, $missingExitCode);
+        self::assertSame("ERROR: User \"missing\" was not found.\n", $missingOutput);
+
+        [$usageExitCode, $usageOutput] = $this->runArgumentCommand($command, ['alice', 'extra']);
+        self::assertSame(1, $usageExitCode);
+        self::assertSame("Usage: flux user:list-vhosts <username>\n", $usageOutput);
+    }
+
+    public function testGrantVhostThenListVhostsShowsGrantWithoutPermissionRows(): void
+    {
+        $this->users->create('alice', 'secret');
+        (new VirtualHostRepository($this->connection))->create('/test');
+
+        [$grantExitCode] = $this->runArgumentCommand(new UserGrantVhostCommand($this->connection), ['alice', '/test']);
+        self::assertSame(0, $grantExitCode);
+
+        [$vhostsExitCode, $vhostsOutput] = $this->runArgumentCommand(new UserListVhostsCommand($this->connection), ['alice']);
+        self::assertSame(0, $vhostsExitCode);
+        self::assertStringContainsString('Virtual Hosts for user "alice"', $vhostsOutput);
+        self::assertStringContainsString('/test', $vhostsOutput);
+        self::assertStringContainsString('1 virtual host.', $vhostsOutput);
+
+        [$permissionsExitCode, $permissionsOutput] = $this->runArgumentCommand(new UserListPermissionsCommand($this->connection), ['alice']);
+        self::assertSame(0, $permissionsExitCode);
+        self::assertSame("No permissions found for user \"alice\".\n", $permissionsOutput);
     }
 
     public function testGrantCommandGrantsVhostAndListCommandDoesNotExposeSecrets(): void
@@ -201,6 +274,26 @@ final class UserRepositoryTest extends TestCase
         self::assertIsResource($clearOutput);
         self::assertSame(0, (new UserClearPermissionsCommand($this->connection))->run(['alice', '/'], $clearOutput));
         self::assertFalse($authorizer->authorize($result->user, '/', AuthorizationPermission::Configure, 'cfg')->allowed);
+    }
+
+    /**
+     * @param list<string> $arguments
+     * @return array{0: int, 1: string}
+     */
+    private function runArgumentCommand(object $command, array $arguments): array
+    {
+        $stream = fopen('php://memory', 'w+');
+        self::assertIsResource($stream);
+
+        $exitCode = $command->run($arguments, $stream);
+
+        rewind($stream);
+        $output = stream_get_contents($stream);
+        fclose($stream);
+
+        self::assertIsString($output);
+
+        return [$exitCode, $output];
     }
 
     private function resetSchema(): void
