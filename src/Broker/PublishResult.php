@@ -11,15 +11,15 @@ final readonly class PublishResult
      * @param list<Delivery> $deliveries
      */
     public function __construct(
-        public Message $message,
+        public ?Message $message,
         public array $routes,
         public array $deliveries
     ) {
     }
 
-    public function messageId(): string
+    public function messageId(): ?string
     {
-        return $this->message->messageId;
+        return $this->message?->messageId;
     }
 
     public function routeCount(): int

@@ -22,7 +22,8 @@ final readonly class PublishRequest
         public ?string $contentEncoding = null,
         public int $priority = 0,
         public bool $persistent = true,
-        public ?string $messageId = null
+        public ?string $messageId = null,
+        public bool $persistUnrouted = true
     ) {
         if ($this->virtualHost === '') {
             throw new InvalidArgumentException('Virtual host must not be empty.');

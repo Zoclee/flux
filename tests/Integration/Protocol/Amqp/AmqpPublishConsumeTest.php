@@ -219,6 +219,100 @@ final class AmqpPublishConsumeTest extends TestCase
         }
     }
 
+    public function testRoutableMandatoryPublishWithConfirmsIsAcknowledged(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 40, 10, $this->exchangeDeclare('orders.direct'));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('orders', 'orders.direct', 'created'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, 'orders.direct', 'created', 'routable', mandatory: true);
+            $ack = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([60, 80], $ack->method());
+            self::assertSame(1, $this->deliveryTagFromBasicAck($ack));
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(1, $this->tableCount('message_routes'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testUnroutableMandatoryPublishReturnsOriginalMessageAndThenConfirms(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 40, 10, $this->exchangeDeclare('orders.direct'));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, 'orders.direct', 'missing', 'returned', mandatory: true);
+            $return = $this->readMethodFrame($listener, $client);
+            $header = $this->readFrame($listener, $client);
+            $body = $this->readFrame($listener, $client);
+            $ack = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([60, 50], $return->method());
+            self::assertSame(
+                [
+                    'reply_code' => 312,
+                    'exchange' => 'orders.direct',
+                    'routing_key' => 'missing',
+                ],
+                $this->basicReturnDetails($return)
+            );
+            self::assertStringContainsString('NO_ROUTE', $this->basicReturnReplyText($return));
+            self::assertSame(Frame::TYPE_HEADER, $header->type);
+            self::assertSame(strlen('returned'), $this->bodySizeFromHeader($header));
+            self::assertSame(Frame::TYPE_BODY, $body->type);
+            self::assertSame('returned', $body->payload);
+            self::assertSame([60, 80], $ack->method());
+            self::assertSame(1, $this->deliveryTagFromBasicAck($ack));
+            self::assertSame(0, $this->tableCount('messages'));
+            self::assertSame(0, $this->tableCount('message_routes'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testUnroutableNonMandatoryPublishIsSilentlyDiscardedAndConfirmed(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 40, 10, $this->exchangeDeclare('orders.direct'));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, 'orders.direct', 'missing', 'discarded');
+            $ack = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([60, 80], $ack->method());
+            self::assertSame(1, $this->deliveryTagFromBasicAck($ack));
+            self::assertSame(0, $this->tableCount('messages'));
+            self::assertSame(0, $this->tableCount('message_routes'));
+            self::assertSame(0, $this->tableCount('deliveries'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testTlsDefaultExchangePublishConsumeAndAckUsesSameBrokerFlow(): void
     {
         [$listener, $client] = $this->startedTlsListener();
@@ -1537,9 +1631,9 @@ final class AmqpPublishConsumeTest extends TestCase
         return pack('n', 0) . $this->shortString($queue) . $this->shortString($exchange) . $this->shortString($routingKey) . "\x00" . pack('N', 0);
     }
 
-    private function basicPublish(string $exchange, string $routingKey): string
+    private function basicPublish(string $exchange, string $routingKey, bool $mandatory = false): string
     {
-        return pack('n', 0) . $this->shortString($exchange) . $this->shortString($routingKey) . "\x00";
+        return pack('n', 0) . $this->shortString($exchange) . $this->shortString($routingKey) . chr($mandatory ? 1 : 0);
     }
 
     private function basicConsume(string $queue, string $consumerTag): string
@@ -1600,10 +1694,11 @@ final class AmqpPublishConsumeTest extends TestCase
         int $channel,
         string $exchange,
         string $routingKey,
-        string $body
+        string $body,
+        bool $mandatory = false
     ): void {
         $codec = new FrameCodec();
-        $this->sendMethod($client, $channel, 60, 40, $this->basicPublish($exchange, $routingKey));
+        $this->sendMethod($client, $channel, 60, 40, $this->basicPublish($exchange, $routingKey, $mandatory));
         fwrite($client, $codec->encode($this->contentHeader($channel, strlen($body))));
         fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, $channel, $body)));
         $listener->tick();
@@ -1751,6 +1846,32 @@ final class AmqpPublishConsumeTest extends TestCase
         $reader->readShortString();
 
         return $reader->readLong();
+    }
+
+    /**
+     * @return array{reply_code: int, exchange: string, routing_key: string}
+     */
+    private function basicReturnDetails(Frame $frame): array
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+        $replyCode = $reader->readShort();
+        $reader->readShortString();
+        $exchange = $reader->readShortString();
+        $routingKey = $reader->readShortString();
+
+        return [
+            'reply_code' => $replyCode,
+            'exchange' => $exchange,
+            'routing_key' => $routingKey,
+        ];
+    }
+
+    private function basicReturnReplyText(Frame $frame): string
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readShort();
+
+        return $reader->readShortString();
     }
 
     private function multipleFromBasicAck(Frame $frame): bool

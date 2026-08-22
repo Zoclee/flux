@@ -143,13 +143,34 @@ final class BrokerPublishTest extends TestCase
         }
     }
 
-    public function testNoMatchingBindingStillCommitsUnroutedMessage(): void
+    public function testNoMatchingBindingStillCommitsUnroutedMessageByDefault(): void
     {
         $result = $this->broker->publish(new PublishRequest('/', 'orders', 'missing', 'payload'));
 
         self::assertSame(0, $result->routeCount());
         self::assertSame(0, $result->deliveryCount());
         self::assertSame(1, $this->tableCount('messages'));
+        self::assertNotNull($result->message);
+        self::assertSame('payload', $result->message->payload);
+        self::assertSame(0, $this->tableCount('message_routes'));
+        self::assertSame(0, $this->tableCount('deliveries'));
+    }
+
+    public function testNoMatchingBindingCanDiscardUnroutedMessageWithoutPersistingGraph(): void
+    {
+        $result = $this->broker->publish(new PublishRequest(
+            '/',
+            'orders',
+            'missing',
+            'payload',
+            persistUnrouted: false
+        ));
+
+        self::assertNull($result->message);
+        self::assertNull($result->messageId());
+        self::assertSame(0, $result->routeCount());
+        self::assertSame(0, $result->deliveryCount());
+        self::assertSame(0, $this->tableCount('messages'));
         self::assertSame(0, $this->tableCount('message_routes'));
         self::assertSame(0, $this->tableCount('deliveries'));
     }

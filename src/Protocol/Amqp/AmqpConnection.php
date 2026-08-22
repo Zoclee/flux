@@ -76,7 +76,7 @@ final class AmqpConnection
     private array $pendingPublishMethods = [];
 
     /**
-     * @var array<int, array{exchange: string, routing_key: string, body_size: int, properties: array<string, mixed>, body: string}>
+     * @var array<int, array{exchange: string, routing_key: string, mandatory: bool, immediate: bool, body_size: int, properties: array<string, mixed>, body: string}>
      */
     private array $pendingPublishes = [];
 
@@ -998,6 +998,8 @@ final class AmqpConnection
         $this->pendingPublishes[$frame->channel] = [
             'exchange' => $method['exchange'],
             'routing_key' => $method['routing_key'],
+            'mandatory' => $method['mandatory'],
+            'immediate' => $method['immediate'],
             'body_size' => $bodySize,
             'properties' => $properties,
             'body' => '',
@@ -1070,7 +1072,7 @@ final class AmqpConnection
         }
 
         try {
-            $this->broker()->publish(new PublishRequest(
+            $result = $this->broker()->publish(new PublishRequest(
                 $this->openedVirtualHost(),
                 $publish['exchange'],
                 $publish['routing_key'],
@@ -1080,8 +1082,24 @@ final class AmqpConnection
                 $properties['content_encoding'] ?? null,
                 $properties['priority'] ?? 0,
                 ($properties['delivery_mode'] ?? 2) === 2,
-                $messageId
+                $messageId,
+                persistUnrouted: false
             ));
+            if ($result->routeCount() === 0 && $publish['mandatory']) {
+                $this->sendBasicReturn(
+                    $channel,
+                    312,
+                    sprintf(
+                        'NO_ROUTE - no route for exchange "%s" with routing key "%s"',
+                        $publish['exchange'],
+                        $publish['routing_key']
+                    ),
+                    $publish['exchange'],
+                    $publish['routing_key'],
+                    $publish['body'],
+                    $properties
+                );
+            }
             $this->sendPublishConfirm($channel);
         } catch (TopologyException $exception) {
             $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
@@ -1248,6 +1266,69 @@ final class AmqpConnection
         $values .= $this->shortString($message->messageId);
 
         return pack('nn', 60, 0) . $this->packLongLong(strlen($message->payload)) . pack('n', $flags) . $values;
+    }
+
+    /**
+     * @param array<string, mixed> $properties
+     */
+    private function sendBasicReturn(
+        int $channel,
+        int $replyCode,
+        string $replyText,
+        string $exchange,
+        string $routingKey,
+        string $body,
+        array $properties
+    ): void {
+        $this->writeFrame(Frame::methodFrame(
+            $channel,
+            60,
+            50,
+            pack('n', $replyCode)
+                . $this->shortString($this->truncateReplyText($replyText))
+                . $this->shortString($exchange)
+                . $this->shortString($routingKey)
+        ));
+        $this->writeFrame(new Frame(Frame::TYPE_HEADER, $channel, $this->contentHeaderFromProperties($body, $properties)));
+        foreach (str_split($body, $this->outboundBodyChunkSize()) as $chunk) {
+            $this->writeFrame(new Frame(Frame::TYPE_BODY, $channel, $chunk));
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $properties
+     */
+    private function contentHeaderFromProperties(string $body, array $properties): string
+    {
+        $flags = 0;
+        $values = '';
+
+        if (isset($properties['content_type']) && is_string($properties['content_type'])) {
+            $flags |= 0b1000000000000000;
+            $values .= $this->shortString($properties['content_type']);
+        }
+        if (isset($properties['content_encoding']) && is_string($properties['content_encoding'])) {
+            $flags |= 0b0100000000000000;
+            $values .= $this->shortString($properties['content_encoding']);
+        }
+        if (isset($properties['headers']) && is_array($properties['headers']) && $properties['headers'] !== []) {
+            $flags |= 0b0010000000000000;
+            $values .= $this->fieldTable($properties['headers']);
+        }
+        if (isset($properties['delivery_mode']) && is_int($properties['delivery_mode'])) {
+            $flags |= 0b0001000000000000;
+            $values .= chr($properties['delivery_mode']);
+        }
+        if (isset($properties['priority']) && is_int($properties['priority'])) {
+            $flags |= 0b0000100000000000;
+            $values .= chr($properties['priority']);
+        }
+        if (isset($properties['message_id']) && is_string($properties['message_id'])) {
+            $flags |= 0b0000000010000000;
+            $values .= $this->shortString($properties['message_id']);
+        }
+
+        return pack('nn', 60, 0) . $this->packLongLong(strlen($body)) . pack('n', $flags) . $values;
     }
 
     private function sendPublishConfirm(int $channel): void

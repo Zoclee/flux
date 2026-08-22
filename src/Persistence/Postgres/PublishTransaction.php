@@ -43,7 +43,8 @@ final readonly class PublishTransaction
         ?string $contentEncoding = null,
         int $priority = 0,
         bool $persistent = true,
-        ?string $messageId = null
+        ?string $messageId = null,
+        bool $persistUnrouted = true
     ): PublishResult {
         return $this->connection->transaction(function () use (
             $virtualHostId,
@@ -55,9 +56,14 @@ final readonly class PublishTransaction
             $contentEncoding,
             $priority,
             $persistent,
-            $messageId
+            $messageId,
+            $persistUnrouted
         ): PublishResult {
             $destinationIds = $this->uniqueDestinationIds($this->bindings->findForRoute($virtualHostId, $source, $routingKey));
+            if ($destinationIds === [] && !$persistUnrouted) {
+                return new PublishResult(null, [], []);
+            }
+
             $this->assertQueueDepthCapacity($destinationIds);
 
             $message = $this->messages->create(

@@ -56,7 +56,8 @@ final readonly class Broker
             $request->contentEncoding,
             $request->priority,
             $request->persistent,
-            $request->messageId
+            $request->messageId,
+            $request->persistUnrouted
         );
     }
 
