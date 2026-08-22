@@ -130,6 +130,19 @@ SQL);
         );
     }
 
+    public function countByDestination(int $destinationId): int
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT COUNT(*)
+FROM bindings
+WHERE destination_id = :destination_id
+SQL);
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->execute();
+
+        return (int) $statement->fetchColumn();
+    }
+
     /**
      * @return list<Binding>
      */

@@ -7,6 +7,7 @@ namespace Flux\Tests\Integration\Postgres;
 use DateTimeImmutable;
 use DateTimeZone;
 use Flux\Console\Commands\BindingListCommand;
+use Flux\Console\Commands\BrokerStatsCommand;
 use Flux\Console\Commands\MessagePeekCommand;
 use Flux\Console\Commands\QueueListCommand;
 use Flux\Console\Commands\QueueShowCommand;
@@ -22,6 +23,7 @@ use Flux\Persistence\Postgres\MessageRouteRepository;
 use Flux\Persistence\Postgres\Migrator;
 use Flux\Persistence\Postgres\SubscriptionRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
+use Flux\Runtime\RuntimeDiagnostics;
 use PDO;
 use PHPUnit\Framework\Attributes\Before;
 use PHPUnit\Framework\TestCase;
@@ -109,7 +111,9 @@ final class AdminCommandTest extends TestCase
         $this->bindings->create($this->defaultVirtualHostId, 'orders', $queue->id, 'order.created');
         $this->subscriptions->create($queue->id, 'workers');
         $message = $this->messages->create('payload');
-        $this->routes->create($message->id, $queue->id);
+        $route = $this->routes->create($message->id, $queue->id);
+        $delivery = (new DeliveryRepository($this->connection))->create($route->id, $this->subscriptions->findByName($queue->id, 'workers')?->id ?? 0);
+        $this->pdo->prepare("UPDATE deliveries SET state = 'reserved' WHERE id = :id")->execute(['id' => $delivery->id]);
 
         [$exitCode, $output] = $this->runArgumentCommand(new QueueShowCommand($this->context), ['orders']);
 
@@ -120,6 +124,10 @@ final class AdminCommandTest extends TestCase
         self::assertStringContainsString('Bindings:       1', $output);
         self::assertStringContainsString('Subscriptions:  1', $output);
         self::assertStringContainsString('Routes:         1', $output);
+        self::assertStringContainsString('Pending:        0', $output);
+        self::assertStringContainsString('Reserved:       1', $output);
+        self::assertStringContainsString('Acknowledged:   0', $output);
+        self::assertStringContainsString('Rejected:       0', $output);
 
         [$missingExitCode, $missingOutput] = $this->runArgumentCommand(new QueueShowCommand($this->context), ['missing']);
 
@@ -208,6 +216,44 @@ SQL)->execute(['message_route_id' => $earlyRoute->id]);
         self::assertSame(0, $exitCode);
         self::assertStringContainsString('Queue: empty', $output);
         self::assertStringContainsString('No messages found.', $output);
+    }
+
+    public function testBrokerStatsReportsRuntimeUnavailableAndPersistenceCounts(): void
+    {
+        $queue = $this->destinations->create($this->defaultVirtualHostId, 'orders', 'queue');
+        $subscription = $this->subscriptions->create($queue->id, 'workers');
+        $messageA = $this->messages->create('a');
+        $messageB = $this->messages->create('b');
+        $routeA = $this->routes->create($messageA->id, $queue->id);
+        $routeB = $this->routes->create($messageB->id, $queue->id);
+        $pending = (new DeliveryRepository($this->connection))->create($routeA->id, $subscription->id);
+        $reserved = (new DeliveryRepository($this->connection))->create($routeB->id, $subscription->id);
+        $this->pdo->prepare("UPDATE deliveries SET state = 'reserved' WHERE id = :id")->execute(['id' => $reserved->id]);
+
+        [$exitCode, $output] = $this->runSimpleCommand(new BrokerStatsCommand($this->context, new UnavailableRuntimeDiagnostics()));
+
+        self::assertSame(0, $exitCode);
+        self::assertStringContainsString('Broker Statistics', $output);
+        self::assertStringContainsString('Runtime: unavailable', $output);
+        self::assertStringContainsString('Virtual Hosts: 1', $output);
+        self::assertStringContainsString('Queues:        1', $output);
+        self::assertStringContainsString('Messages:      2', $output);
+        self::assertStringContainsString('Routes:        2', $output);
+        self::assertStringContainsString('Pending:       1', $output);
+        self::assertStringContainsString('Reserved:      1', $output);
+        self::assertStringContainsString('Acknowledged:  0', $output);
+        self::assertStringContainsString('Rejected:      0', $output);
+
+        self::assertNotNull((new DeliveryRepository($this->connection))->findById($pending->id));
+    }
+
+    public function testBrokerStatsReportsRuntimeCountsWhenAvailable(): void
+    {
+        [$exitCode, $output] = $this->runSimpleCommand(new BrokerStatsCommand($this->context, new AvailableRuntimeDiagnostics()));
+
+        self::assertSame(0, $exitCode);
+        self::assertStringContainsString('Connections: 3', $output);
+        self::assertStringContainsString('Consumers:   5', $output);
     }
 
     public function testNewRepositoryReadMethodsAreScopedAndDeterministic(): void
@@ -324,5 +370,41 @@ SQL)->execute(['message_route_id' => $earlyRoute->id]);
                 is_scalar($databaseName) ? (string) $databaseName : 'unknown'
             ));
         }
+    }
+}
+
+final readonly class UnavailableRuntimeDiagnostics implements RuntimeDiagnostics
+{
+    public function stats(): array
+    {
+        throw new \RuntimeException('unavailable');
+    }
+
+    public function connections(): array
+    {
+        throw new \RuntimeException('unavailable');
+    }
+
+    public function consumers(): array
+    {
+        throw new \RuntimeException('unavailable');
+    }
+}
+
+final readonly class AvailableRuntimeDiagnostics implements RuntimeDiagnostics
+{
+    public function stats(): array
+    {
+        return ['connections' => 3, 'consumers' => 5];
+    }
+
+    public function connections(): array
+    {
+        return [];
+    }
+
+    public function consumers(): array
+    {
+        return [];
     }
 }

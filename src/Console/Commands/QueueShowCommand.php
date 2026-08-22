@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Flux\Console\Commands;
 
 use Flux\Broker\DestinationType;
+use Flux\Broker\DeliveryState;
 use Flux\Persistence\Postgres\BindingRepository;
+use Flux\Persistence\Postgres\DeliveryRepository;
 use Flux\Persistence\Postgres\DestinationRepository;
 use Flux\Persistence\Postgres\MessageRouteRepository;
 use Flux\Persistence\Postgres\SubscriptionRepository;
@@ -44,9 +46,10 @@ final readonly class QueueShowCommand
                 return 1;
             }
 
-            $bindingCount = count((new BindingRepository($connection))->allByDestination($queue->id));
-            $subscriptionCount = count((new SubscriptionRepository($connection))->allByDestination($queue->id));
+            $bindingCount = (new BindingRepository($connection))->countByDestination($queue->id);
+            $subscriptionCount = (new SubscriptionRepository($connection))->countByDestination($queue->id);
             $routeCount = (new MessageRouteRepository($connection))->countByDestination($queue->id);
+            $deliveryCounts = (new DeliveryRepository($connection))->countByStateForDestination($queue->id);
         } catch (Throwable $exception) {
             $this->write($output, sprintf("ERROR: %s\n", $this->context->safeError($exception)));
 
@@ -64,8 +67,20 @@ final readonly class QueueShowCommand
         $this->write($output, sprintf("Bindings:       %d\n", $bindingCount));
         $this->write($output, sprintf("Subscriptions:  %d\n", $subscriptionCount));
         $this->write($output, sprintf("Routes:         %d\n", $routeCount));
+        $this->write($output, sprintf("Pending:        %d\n", self::deliveryCount($deliveryCounts, DeliveryState::Pending)));
+        $this->write($output, sprintf("Reserved:       %d\n", self::deliveryCount($deliveryCounts, DeliveryState::Reserved)));
+        $this->write($output, sprintf("Acknowledged:   %d\n", self::deliveryCount($deliveryCounts, DeliveryState::Acknowledged)));
+        $this->write($output, sprintf("Rejected:       %d\n", self::deliveryCount($deliveryCounts, DeliveryState::Rejected)));
 
         return 0;
+    }
+
+    /**
+     * @param array<string, int> $counts
+     */
+    private static function deliveryCount(array $counts, DeliveryState $state): int
+    {
+        return $counts[$state->value] ?? 0;
     }
 
     private static function yesNo(bool $value): string

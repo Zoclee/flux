@@ -18,6 +18,7 @@ use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
 use Flux\Runtime\RuntimeConnection;
 use Flux\Runtime\RuntimeConsumer;
+use Flux\Runtime\RuntimeDiagnosticsServer;
 use Flux\Runtime\RuntimeState;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
@@ -114,6 +115,29 @@ final class BrokerRuntimeTest extends TestCase
         $runtime->run(maxIterations: 2);
 
         self::assertSame(['start', 'tick', 'tick', 'stop'], $events);
+    }
+
+    public function testRuntimeShutdownClosesDiagnosticsComponent(): void
+    {
+        $diagnostics = new RuntimeDiagnosticsServer(new ConnectionRegistry(), new ConsumerRegistry(), port: 0);
+        $runtime = new BrokerRuntime(
+            $this->broker(),
+            new ConnectionRegistry(),
+            new ConsumerRegistry(),
+            0,
+            static function (): void {
+            },
+            [$diagnostics]
+        );
+
+        $runtime->run(maxIterations: 0);
+
+        $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $diagnostics->port()), $errorCode, $errorMessage, 0.1);
+        if (is_resource($client)) {
+            fclose($client);
+        }
+
+        self::assertFalse($client);
     }
 
     private function runtime(?callable $sleep = null): BrokerRuntime

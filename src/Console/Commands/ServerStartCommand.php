@@ -20,6 +20,7 @@ use Flux\Protocol\Amqp\AmqpListener;
 use Flux\Runtime\BrokerRuntime;
 use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
+use Flux\Runtime\RuntimeDiagnosticsServer;
 use Throwable;
 
 final class ServerStartCommand
@@ -31,6 +32,8 @@ final class ServerStartCommand
     private string $amqpHost;
     private int $amqpPort;
     private int $amqpHeartbeat;
+    private string $diagnosticsHost;
+    private int $diagnosticsPort;
 
     /**
      * @param null|callable(Broker, ConnectionRegistry, ConsumerRegistry): BrokerRuntime $runtimeFactory
@@ -41,6 +44,8 @@ final class ServerStartCommand
         string|callable $amqpHost = '127.0.0.1',
         int $amqpPort = 5672,
         int $amqpHeartbeat = 60,
+        string $diagnosticsHost = '127.0.0.1',
+        int $diagnosticsPort = 5673,
         ?callable $runtimeFactory = null
     ) {
         if (is_callable($amqpHost)) {
@@ -48,11 +53,15 @@ final class ServerStartCommand
             $amqpHost = '127.0.0.1';
             $amqpPort = 5672;
             $amqpHeartbeat = 60;
+            $diagnosticsHost = '127.0.0.1';
+            $diagnosticsPort = 5673;
         }
 
         $this->amqpHost = $amqpHost;
         $this->amqpPort = $amqpPort;
         $this->amqpHeartbeat = $amqpHeartbeat;
+        $this->diagnosticsHost = $diagnosticsHost;
+        $this->diagnosticsPort = $diagnosticsPort;
         $this->runtimeFactory = $runtimeFactory;
     }
 
@@ -97,6 +106,11 @@ final class ServerStartCommand
             $this->amqpHost,
             $this->amqpPort,
             $this->amqpHeartbeat
+        ));
+        $this->write($output, sprintf(
+            "Diagnostics:\n  Runtime     %s:%d\n\n",
+            $this->diagnosticsHost,
+            $this->diagnosticsPort
         ));
         $this->write($output, "Runtime started.\n");
         $this->write($output, "Press Ctrl+C to stop.\n");
@@ -161,6 +175,7 @@ final class ServerStartCommand
                     consumers: $consumers,
                     heartbeatInterval: $this->amqpHeartbeat
                 ),
+                new RuntimeDiagnosticsServer($connections, $consumers, $this->diagnosticsHost, $this->diagnosticsPort),
             ]
         );
     }

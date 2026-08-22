@@ -94,6 +94,51 @@ SQL, self::COLUMNS));
         );
     }
 
+    /**
+     * @return array<string, int>
+     */
+    public function countByState(): array
+    {
+        $statement = $this->connection->pdo()->query(<<<'SQL'
+SELECT state, COUNT(*) AS count
+FROM deliveries
+GROUP BY state
+SQL);
+
+        if ($statement === false) {
+            throw new RuntimeException('Could not count deliveries in PostgreSQL.');
+        }
+
+        $counts = [];
+        foreach ($statement->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $counts[(string) $row['state']] = (int) $row['count'];
+        }
+
+        return $counts;
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    public function countByStateForDestination(int $destinationId): array
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT state, COUNT(*) AS count
+FROM deliveries
+WHERE destination_id = :destination_id
+GROUP BY state
+SQL);
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->execute();
+
+        $counts = [];
+        foreach ($statement->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $counts[(string) $row['state']] = (int) $row['count'];
+        }
+
+        return $counts;
+    }
+
     public function reserveNext(int $subscriptionId, string $consumerId, ?string $deliveryTag = null): ?Delivery
     {
         return $this->connection->transaction(function (PDO $pdo) use ($subscriptionId, $consumerId, $deliveryTag): ?Delivery {

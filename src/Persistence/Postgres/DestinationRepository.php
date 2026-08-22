@@ -89,6 +89,19 @@ SQL);
         );
     }
 
+    public function countByType(DestinationType $type): int
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT COUNT(*)
+FROM destinations
+WHERE type = :type
+SQL);
+        $statement->bindValue('type', $type->value);
+        $statement->execute();
+
+        return (int) $statement->fetchColumn();
+    }
+
     /**
      * @param array{
      *     id: mixed,

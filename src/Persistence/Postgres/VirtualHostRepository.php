@@ -69,6 +69,17 @@ SQL);
         );
     }
 
+    public function countAll(): int
+    {
+        $statement = $this->connection->pdo()->query('SELECT COUNT(*) FROM virtual_hosts');
+
+        if ($statement === false) {
+            throw new RuntimeException('Could not count virtual hosts in PostgreSQL.');
+        }
+
+        return (int) $statement->fetchColumn();
+    }
+
     /**
      * @param array{id: mixed, name: mixed, created_at: mixed} $row
      */

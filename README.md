@@ -27,6 +27,9 @@ php flux --version
 php flux db:status
 php flux migrate
 php flux server:start
+php flux connection:list
+php flux consumer:list
+php flux broker:stats
 php flux vhost:list
 php flux queue:list
 php flux queue:show orders
@@ -75,10 +78,13 @@ The AMQP listener defaults to `127.0.0.1:5672` and can be configured with:
 FLUX_AMQP_HOST
 FLUX_AMQP_PORT
 FLUX_AMQP_HEARTBEAT
+FLUX_DIAGNOSTICS_HOST
+FLUX_DIAGNOSTICS_PORT
 ```
 
 AMQP authentication is a development placeholder only. The listener advertises `PLAIN` so basic clients can complete the connection handshake, but Flux does not yet implement production authentication, ACLs, or permissions.
 `FLUX_AMQP_HEARTBEAT` defaults to `60` seconds. Set it to `0` to disable heartbeat negotiation and timeout cleanup.
+Runtime diagnostics are exposed through a small read-only local socket used by `connection:list`, `consumer:list`, and `broker:stats`. It defaults to `127.0.0.1:5673` and does not expose message payloads or mutation commands.
 
 ### Database Migrations
 

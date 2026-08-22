@@ -72,6 +72,17 @@ SQL);
         return is_array($row) ? $this->mapRow($row) : null;
     }
 
+    public function countAll(): int
+    {
+        $statement = $this->connection->pdo()->query('SELECT COUNT(*) FROM messages');
+
+        if ($statement === false) {
+            throw new RuntimeException('Could not count messages in PostgreSQL.');
+        }
+
+        return (int) $statement->fetchColumn();
+    }
+
     public function findByMessageId(string $messageId): ?Message
     {
         Uuid::assertValid($messageId, 'Message ID');

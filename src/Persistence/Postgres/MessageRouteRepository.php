@@ -145,6 +145,17 @@ SQL);
         return (int) $statement->fetchColumn();
     }
 
+    public function countAll(): int
+    {
+        $statement = $this->connection->pdo()->query('SELECT COUNT(*) FROM message_routes');
+
+        if ($statement === false) {
+            throw new RuntimeException('Could not count message routes in PostgreSQL.');
+        }
+
+        return (int) $statement->fetchColumn();
+    }
+
     /**
      * @param array{
      *     id: mixed,

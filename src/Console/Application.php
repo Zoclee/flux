@@ -6,6 +6,9 @@ namespace Flux\Console;
 
 use Flux\Console\Commands\DbStatusCommand;
 use Flux\Console\Commands\BindingListCommand;
+use Flux\Console\Commands\BrokerStatsCommand;
+use Flux\Console\Commands\ConnectionListCommand;
+use Flux\Console\Commands\ConsumerListCommand;
 use Flux\Console\Commands\MigrateCommand;
 use Flux\Console\Commands\MessagePeekCommand;
 use Flux\Console\Commands\QueueListCommand;
@@ -15,6 +18,7 @@ use Flux\Console\Commands\ServerStartCommand;
 use Flux\Console\Commands\SubscriptionListCommand;
 use Flux\Console\Commands\VhostListCommand;
 use Flux\Persistence\Postgres\ConnectionConfig;
+use Flux\Runtime\RuntimeDiagnosticsClient;
 use Flux\Support\Dotenv;
 use Throwable;
 
@@ -43,6 +47,9 @@ final class Application
             'db:status' => $this->dbStatus($output),
             'migrate' => $this->migrate($output),
             'server:start' => $this->serverStart($output),
+            'connection:list' => $this->runtimeCommand(ConnectionListCommand::class, $output),
+            'consumer:list' => $this->runtimeCommand(ConsumerListCommand::class, $output),
+            'broker:stats' => $this->brokerStats($output),
             'vhost:list' => $this->readOnlyCommand(VhostListCommand::class, [], $output),
             'queue:list' => $this->readOnlyCommand(QueueListCommand::class, [], $output),
             'queue:show' => $this->readOnlyCommand(QueueShowCommand::class, array_slice($argv, 2), $output, true),
@@ -74,8 +81,11 @@ Database:
 
 Server:
   server:start          Start the Flux broker runtime
+  connection:list       List active runtime connections
+  consumer:list         List active runtime consumers
 
 Broker state:
+  broker:stats          Show runtime and persistence statistics
   vhost:list            List virtual hosts
   queue:list            List queues
   queue:show <queue>    Show queue details
@@ -169,6 +179,7 @@ HELP);
             [, $config] = $this->projectContext();
             $databaseConfig = ConnectionConfig::fromArray($config['database']);
             $amqpConfig = $config['amqp'] ?? [];
+            $diagnosticsConfig = $config['diagnostics'] ?? [];
         } catch (Throwable $exception) {
             $this->write($output, "Flux Message Broker\n\n");
             $this->write($output, "Status:   stopped\n\n");
@@ -182,8 +193,48 @@ HELP);
             self::VERSION,
             (string) ($amqpConfig['host'] ?? '127.0.0.1'),
             (int) ($amqpConfig['port'] ?? 5672),
-            (int) ($amqpConfig['heartbeat'] ?? 60)
+            (int) ($amqpConfig['heartbeat'] ?? 60),
+            (string) ($diagnosticsConfig['host'] ?? '127.0.0.1'),
+            (int) ($diagnosticsConfig['port'] ?? 5673)
         ))->run($output);
+    }
+
+    /**
+     * @param class-string $commandClass
+     * @param resource $output
+     */
+    private function runtimeCommand(string $commandClass, mixed $output): int
+    {
+        try {
+            [, $config] = $this->projectContext();
+            $diagnosticsConfig = $config['diagnostics'] ?? [];
+        } catch (Throwable $exception) {
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        $command = new $commandClass($this->diagnosticsClient($diagnosticsConfig));
+
+        return $command->run($output);
+    }
+
+    /**
+     * @param resource $output
+     */
+    private function brokerStats(mixed $output): int
+    {
+        try {
+            [, $config] = $this->projectContext();
+            $context = new ReadOnlyDatabaseContext(ConnectionConfig::fromArray($config['database']));
+            $diagnosticsConfig = $config['diagnostics'] ?? [];
+        } catch (Throwable $exception) {
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        return (new BrokerStatsCommand($context, $this->diagnosticsClient($diagnosticsConfig)))->run($output);
     }
 
     /**
@@ -209,6 +260,17 @@ HELP);
         }
 
         return $command->run($arguments, $output);
+    }
+
+    /**
+     * @param array<string, mixed> $diagnosticsConfig
+     */
+    private function diagnosticsClient(array $diagnosticsConfig): RuntimeDiagnosticsClient
+    {
+        return new RuntimeDiagnosticsClient(
+            (string) ($diagnosticsConfig['host'] ?? '127.0.0.1'),
+            (int) ($diagnosticsConfig['port'] ?? 5673)
+        );
     }
 
     /**
