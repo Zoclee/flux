@@ -260,6 +260,289 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
     }
 
+    public function testBasicQosReturnsQosOk(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 60, 10, $this->basicQos(0, 1, false));
+
+            self::assertSame([60, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testPrefetchOneDeliversOnlyOneUnackedMessage(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['first', 'second']);
+            $this->sendMethod($client, 1, 60, 10, $this->basicQos(0, 1, false));
+            self::assertSame([60, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->readDeliveryBody($listener, $client);
+            $this->assertNoFrame($listener, $client);
+            self::assertSame([DeliveryState::Reserved, DeliveryState::Pending], $this->deliveryStates('orders'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testAckFreesPrefetchCapacityAndAllowsNextDelivery(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['first', 'second']);
+            $this->sendMethod($client, 1, 60, 10, $this->basicQos(0, 1, false));
+            self::assertSame([60, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $first = $this->readMethodFrame($listener, $client);
+            $firstTag = $this->deliveryTagFromDeliver($first);
+            $this->readFrame($listener, $client);
+            self::assertSame('first', $this->readFrame($listener, $client)->payload);
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong($firstTag) . "\x00");
+            $second = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([60, 60], $second->method());
+            $this->readFrame($listener, $client);
+            self::assertSame('second', $this->readFrame($listener, $client)->payload);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testRejectFreesPrefetchCapacity(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['first', 'second']);
+            $this->sendMethod($client, 1, 60, 10, $this->basicQos(0, 1, false));
+            self::assertSame([60, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $first = $this->readMethodFrame($listener, $client);
+            $firstTag = $this->deliveryTagFromDeliver($first);
+            $this->readFrame($listener, $client);
+            self::assertSame('first', $this->readFrame($listener, $client)->payload);
+
+            $this->sendMethod($client, 1, 60, 90, $this->packLongLong($firstTag) . "\x00");
+            $second = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([60, 60], $second->method());
+            $this->readFrame($listener, $client);
+            self::assertSame('second', $this->readFrame($listener, $client)->payload);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame([DeliveryState::Rejected, DeliveryState::Pending], $this->deliveryStates('orders'));
+    }
+
+    public function testNackRequeueFalseRejectsDelivery(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['first']);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $deliver = $this->readMethodFrame($listener, $client);
+            $deliveryTag = $this->deliveryTagFromDeliver($deliver);
+            $this->readFrame($listener, $client);
+            $this->readFrame($listener, $client);
+
+            $this->sendMethod($client, 1, 60, 120, $this->basicNack($deliveryTag, false, false));
+            $listener->tick();
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(DeliveryState::Rejected, $this->singleDelivery('orders')->state);
+    }
+
+    public function testNackRequeueTrueReleasesAndRedelivers(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['first']);
+            $this->sendMethod($client, 1, 60, 10, $this->basicQos(0, 1, false));
+            self::assertSame([60, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $first = $this->readMethodFrame($listener, $client);
+            $firstTag = $this->deliveryTagFromDeliver($first);
+            $this->readFrame($listener, $client);
+            self::assertSame('first', $this->readFrame($listener, $client)->payload);
+
+            $this->sendMethod($client, 1, 60, 120, $this->basicNack($firstTag, false, true));
+            $second = $this->readMethodFrame($listener, $client);
+            $secondTag = $this->deliveryTagFromDeliver($second);
+
+            self::assertSame([60, 60], $second->method());
+            self::assertNotSame($firstTag, $secondTag);
+            $this->readFrame($listener, $client);
+            self::assertSame('first', $this->readFrame($listener, $client)->payload);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
+    }
+
+    public function testPrefetchZeroIsUnlimited(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['first', 'second']);
+            $this->sendMethod($client, 1, 60, 10, $this->basicQos(0, 0, false));
+            self::assertSame([60, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            self::assertSame('first', $this->readDeliveryBody($listener, $client));
+            self::assertSame('second', $this->readDeliveryBody($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame([DeliveryState::Pending, DeliveryState::Pending], $this->deliveryStates('orders'));
+    }
+
+    public function testUnsupportedPrefetchSizeIsRejected(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 60, 10, $this->basicQos(1, 1, false));
+
+            self::assertSame([20, 40], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testUnsupportedQosGlobalModeIsRejected(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 60, 10, $this->basicQos(0, 1, true));
+
+            self::assertSame([20, 40], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testInvalidNackDeliveryTagFailsSafelyAndRuntimeContinues(): void
+    {
+        $connections = new ConnectionRegistry();
+        $listener = new AmqpListener(
+            $connections,
+            '127.0.0.1',
+            0,
+            broker: $this->broker(),
+            consumers: new ConsumerRegistry()
+        );
+        $listener->start();
+        $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $listener->port()), $errorCode, $errorMessage, 1.0);
+        self::assertIsResource($client, sprintf('Could not connect to AMQP listener: %s', $errorMessage));
+        stream_set_blocking($client, false);
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 60, 120, $this->basicNack(99, false, false));
+
+            self::assertSame([20, 40], $this->readMethod($listener, $client));
+            self::assertSame(1, $connections->count());
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(0, $connections->count());
+    }
+
+    public function testNackMultipleTrueIsRejected(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['first']);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $deliver = $this->readMethodFrame($listener, $client);
+            $deliveryTag = $this->deliveryTagFromDeliver($deliver);
+            $this->readFrame($listener, $client);
+            $this->readFrame($listener, $client);
+
+            $this->sendMethod($client, 1, 60, 120, $this->basicNack($deliveryTag, true, false));
+
+            self::assertSame([20, 40], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
+    }
+
+    public function testMultipleChannelsKeepPrefetchLimitsSeparate(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['first', 'second']);
+            $this->sendMethod($client, 1, 60, 10, $this->basicQos(0, 1, false));
+            self::assertSame([60, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 2, 60, 10, $this->basicQos(0, 1, false));
+            self::assertSame([60, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertSame('first', $this->readDeliveryBody($listener, $client));
+            $this->sendMethod($client, 2, 60, 20, $this->basicConsume('orders', 'consumer-b'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertSame('second', $this->readDeliveryBody($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame([DeliveryState::Pending, DeliveryState::Pending], $this->deliveryStates('orders'));
+    }
+
     /**
      * @return array{0: AmqpListener, 1: resource}
      */
@@ -329,6 +612,74 @@ final class AmqpPublishConsumeTest extends TestCase
     private function basicConsume(string $queue, string $consumerTag): string
     {
         return pack('n', 0) . $this->shortString($queue) . $this->shortString($consumerTag) . "\x00" . pack('N', 0);
+    }
+
+    private function basicQos(int $prefetchSize, int $prefetchCount, bool $global): string
+    {
+        return pack('Nn', $prefetchSize, $prefetchCount) . chr($global ? 1 : 0);
+    }
+
+    private function basicNack(int $deliveryTag, bool $multiple, bool $requeue): string
+    {
+        $bits = 0;
+        if ($multiple) {
+            $bits |= 0b00000001;
+        }
+        if ($requeue) {
+            $bits |= 0b00000010;
+        }
+
+        return $this->packLongLong($deliveryTag) . chr($bits);
+    }
+
+    /**
+     * @param resource $client
+     * @param list<string> $bodies
+     */
+    private function declareQueueAndPublishBodies(AmqpListener $listener, mixed $client, string $queue, array $bodies): void
+    {
+        $codec = new FrameCodec();
+        $this->sendMethod($client, 1, 50, 10, $this->queueDeclare($queue));
+        self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+        foreach ($bodies as $body) {
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('', $queue));
+            fwrite($client, $codec->encode($this->contentHeader(1, strlen($body))));
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, $body)));
+            $listener->tick();
+        }
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function readDeliveryBody(AmqpListener $listener, mixed $client): string
+    {
+        $deliver = $this->readMethodFrame($listener, $client);
+        self::assertSame([60, 60], $deliver->method());
+        $this->readFrame($listener, $client);
+
+        return $this->readFrame($listener, $client)->payload;
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function assertNoFrame(AmqpListener $listener, mixed $client): void
+    {
+        for ($attempt = 0; $attempt < 10; $attempt++) {
+            $listener->tick();
+            $bytes = fread($client, 8192);
+            if (is_string($bytes) && $bytes !== '') {
+                $frames = (new FrameCodec())->push($bytes);
+                if ($frames !== []) {
+                    self::fail('Unexpected AMQP frame was received.');
+                }
+            }
+            usleep(1000);
+        }
+
+        self::assertTrue(true);
     }
 
     private function contentHeader(int $channel, int $bodySize, ?string $contentType = null, int $priority = 0): Frame
@@ -433,6 +784,23 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertCount(1, $deliveries);
 
         return $deliveries[0];
+    }
+
+    /**
+     * @return list<DeliveryState>
+     */
+    private function deliveryStates(string $queue): array
+    {
+        $destination = (new DestinationRepository($this->connection))->findByName($this->virtualHostId, $queue);
+        self::assertNotNull($destination);
+        $subscription = (new SubscriptionRepository($this->connection))->findByName($destination->id, 'amqp');
+        self::assertNotNull($subscription);
+        $deliveries = (new DeliveryRepository($this->connection))->allBySubscription($subscription->id);
+
+        return array_map(
+            static fn (\Flux\Broker\Delivery $delivery): DeliveryState => $delivery->state,
+            $deliveries
+        );
     }
 
     private function broker(): Broker

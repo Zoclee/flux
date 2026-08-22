@@ -48,6 +48,11 @@ final class AmqpConnection
     private array $channels = [];
 
     /**
+     * @var array<int, int>
+     */
+    private array $prefetchCounts = [];
+
+    /**
      * @var array<int, array{exchange: string, routing_key: string, mandatory: bool, immediate: bool}>
      */
     private array $pendingPublishMethods = [];
@@ -197,6 +202,7 @@ final class AmqpConnection
 
         $this->connections->remove($this->runtimeConnection->id);
         $this->channels = [];
+        $this->prefetchCounts = [];
         $this->pendingPublishMethods = [];
         $this->pendingPublishes = [];
         $this->nextDeliveryTags = [];
@@ -316,10 +322,12 @@ final class AmqpConnection
                 [50, 10] => $this->handleQueueDeclare($frame),
                 [40, 10] => $this->handleExchangeDeclare($frame),
                 [50, 20] => $this->handleQueueBind($frame),
+                [60, 10] => $this->handleBasicQos($frame),
                 [60, 40] => $this->handleBasicPublish($frame),
                 [60, 20] => $this->handleBasicConsume($frame),
                 [60, 80] => $this->handleBasicAck($frame),
                 [60, 90] => $this->handleBasicReject($frame),
+                [60, 120] => $this->handleBasicNack($frame),
                 default => $this->sendChannelError(
                     $frame->channel,
                     540,
@@ -339,6 +347,29 @@ final class AmqpConnection
         } catch (RuntimeException $exception) {
             $this->sendChannelError($frame->channel, 541, $exception->getMessage(), $classId, $methodId);
         }
+    }
+
+    private function handleBasicQos(Frame $frame): void
+    {
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $prefetchSize = $reader->readLong();
+        $prefetchCount = $reader->readShort();
+        $bits = $reader->readOctet();
+        $reader->assertComplete();
+
+        if ($prefetchSize !== 0) {
+            $this->sendChannelError($frame->channel, 540, 'NOT_IMPLEMENTED - basic.qos prefetch-size is not supported', 60, 10);
+            return;
+        }
+
+        if (($bits & 0b00000001) !== 0) {
+            $this->sendChannelError($frame->channel, 540, 'NOT_IMPLEMENTED - basic.qos global=true is not supported', 60, 10);
+            return;
+        }
+
+        $this->prefetchCounts[$frame->channel] = $prefetchCount;
+        $this->writeFrame(Frame::methodFrame($frame->channel, 60, 11));
+        $this->deliverToConsumers();
     }
 
     private function handleQueueDeclare(Frame $frame): void
@@ -518,6 +549,8 @@ final class AmqpConnection
 
         $this->broker()->acknowledge(new AcknowledgeRequest($mapping['delivery']->id));
         unset($this->unackedDeliveries[$frame->channel][$deliveryTag]);
+        $this->clearEmptyUnackedChannel($frame->channel);
+        $this->deliverToConsumers();
     }
 
     private function handleBasicReject(Frame $frame): void
@@ -540,6 +573,37 @@ final class AmqpConnection
         }
 
         unset($this->unackedDeliveries[$frame->channel][$deliveryTag]);
+        $this->clearEmptyUnackedChannel($frame->channel);
+        $this->deliverToConsumers();
+    }
+
+    private function handleBasicNack(Frame $frame): void
+    {
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $deliveryTag = $reader->readLongLong();
+        $bits = $reader->readOctet();
+        $reader->assertComplete();
+
+        if (($bits & 0b00000001) !== 0) {
+            $this->sendChannelError($frame->channel, 540, 'NOT_IMPLEMENTED - basic.nack multiple=true is not supported', 60, 120);
+            return;
+        }
+
+        $mapping = $this->unackedDeliveries[$frame->channel][$deliveryTag] ?? null;
+        if ($mapping === null) {
+            $this->sendChannelError($frame->channel, 406, 'PRECONDITION_FAILED - unknown delivery tag', 60, 120);
+            return;
+        }
+
+        if (($bits & 0b00000010) !== 0) {
+            $this->broker()->release(new ReleaseRequest($mapping['delivery']->id));
+        } else {
+            $this->broker()->reject(new RejectRequest($mapping['delivery']->id));
+        }
+
+        unset($this->unackedDeliveries[$frame->channel][$deliveryTag]);
+        $this->clearEmptyUnackedChannel($frame->channel);
+        $this->deliverToConsumers();
     }
 
     private function handleContentFrame(Frame $frame): void
@@ -736,6 +800,10 @@ final class AmqpConnection
                 continue;
             }
 
+            if (!$this->consumerHasPrefetchCapacity($channel, $consumerTag)) {
+                continue;
+            }
+
             $deliveryTag = $this->nextDeliveryTags[$channel] ?? 1;
             $delivery = $this->broker()->reserve(new ReserveRequest(
                 $state['consumer']->virtualHost,
@@ -819,7 +887,12 @@ final class AmqpConnection
 
     private function closeChannel(int $channel): void
     {
-        unset($this->channels[$channel], $this->pendingPublishMethods[$channel], $this->pendingPublishes[$channel]);
+        unset(
+            $this->channels[$channel],
+            $this->prefetchCounts[$channel],
+            $this->pendingPublishMethods[$channel],
+            $this->pendingPublishes[$channel]
+        );
 
         foreach ($this->activeConsumers as $consumerTag => $state) {
             if ($state['channel'] === $channel) {
@@ -866,6 +939,35 @@ final class AmqpConnection
 
         if ($released > 0) {
             error_log(sprintf('AMQP unacked deliveries released: %d', $released));
+        }
+    }
+
+    private function consumerHasPrefetchCapacity(int $channel, string $consumerTag): bool
+    {
+        $prefetchCount = $this->prefetchCounts[$channel] ?? 0;
+        if ($prefetchCount === 0) {
+            return true;
+        }
+
+        return $this->unackedCount($channel, $consumerTag) < $prefetchCount;
+    }
+
+    private function unackedCount(int $channel, string $consumerTag): int
+    {
+        $count = 0;
+        foreach ($this->unackedDeliveries[$channel] ?? [] as $mapping) {
+            if ($mapping['consumer_tag'] === $consumerTag) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
+    private function clearEmptyUnackedChannel(int $channel): void
+    {
+        if (($this->unackedDeliveries[$channel] ?? []) === []) {
+            unset($this->unackedDeliveries[$channel]);
         }
     }
 
