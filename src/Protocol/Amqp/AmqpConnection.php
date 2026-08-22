@@ -582,7 +582,10 @@ final class AmqpConnection
         }
 
         $sourceType = RoutingSourceType::tryFrom($type);
-        if ($sourceType === null || !in_array($sourceType, [RoutingSourceType::Direct, RoutingSourceType::Fanout], true)) {
+        if (
+            $sourceType === null
+            || !in_array($sourceType, [RoutingSourceType::Direct, RoutingSourceType::Fanout, RoutingSourceType::Topic], true)
+        ) {
             throw new TopologyException(sprintf('Exchange type "%s" is not supported.', $type), TopologyException::NOT_IMPLEMENTED);
         }
 
@@ -603,6 +606,13 @@ final class AmqpConnection
                 $passive
             ),
             RoutingSourceType::Fanout => $this->broker()->declareFanoutRoutingSource(
+                $this->openedVirtualHost(),
+                $exchange,
+                $durable,
+                $autoDelete,
+                $passive
+            ),
+            RoutingSourceType::Topic => $this->broker()->declareTopicRoutingSource(
                 $this->openedVirtualHost(),
                 $exchange,
                 $durable,

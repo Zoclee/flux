@@ -299,6 +299,134 @@ final class PublishTransactionTest extends TestCase
         );
     }
 
+    public function testTopicRoutesLiteralStarHashAndMixedPatterns(): void
+    {
+        $literal = $this->bindDestination('events.topic', 'orders.eu.payment.created', 'literal');
+        $star = $this->bindDestination('events.topic', 'orders.*.*.created', 'star');
+        $hash = $this->bindDestination('events.topic', 'orders.#', 'hash');
+        $hashSuffix = $this->bindDestination('events.topic', '#.created', 'hash-suffix');
+        $mixed = $this->bindDestination('events.topic', 'orders.*.#.created', 'mixed');
+        $this->bindDestination('events.topic', 'orders.*', 'non-matching-star');
+        $this->bindDestination('events.topic', 'audit.#', 'non-matching-hash');
+
+        $result = $this->publisher->publish(
+            $this->defaultVirtualHostId,
+            'events.topic',
+            'orders.eu.payment.created',
+            'payload',
+            persistUnrouted: false,
+            sourceType: RoutingSourceType::Topic
+        );
+
+        self::assertSame(1, $this->tableCount('messages'));
+        self::assertSame(5, $result->routeCount());
+        self::assertEqualsCanonicalizing(
+            [$literal->id, $star->id, $hash->id, $hashSuffix->id, $mixed->id],
+            array_map(static fn ($route): int => $route->destinationId, $result->routes)
+        );
+    }
+
+    public function testTopicHashMatchesZeroOneAndMultipleWords(): void
+    {
+        $destination = $this->bindDestination('events.topic', 'stock.#', 'stock');
+
+        foreach (['stock', 'stock.us', 'stock.us.nyse'] as $routingKey) {
+            $result = $this->publisher->publish(
+                $this->defaultVirtualHostId,
+                'events.topic',
+                $routingKey,
+                'payload',
+                persistUnrouted: false,
+                sourceType: RoutingSourceType::Topic
+            );
+
+            self::assertSame(1, $result->routeCount());
+            self::assertSame($destination->id, $result->routes[0]->destinationId);
+        }
+    }
+
+    public function testTopicStarMatchesExactlyOneWord(): void
+    {
+        $destination = $this->bindDestination('events.topic', 'stock.*', 'stock-region');
+
+        $oneWord = $this->publisher->publish(
+            $this->defaultVirtualHostId,
+            'events.topic',
+            'stock.us',
+            'payload',
+            persistUnrouted: false,
+            sourceType: RoutingSourceType::Topic
+        );
+        $zeroWords = $this->publisher->publish(
+            $this->defaultVirtualHostId,
+            'events.topic',
+            'stock',
+            'payload',
+            persistUnrouted: false,
+            sourceType: RoutingSourceType::Topic
+        );
+        $multipleWords = $this->publisher->publish(
+            $this->defaultVirtualHostId,
+            'events.topic',
+            'stock.us.nyse',
+            'payload',
+            persistUnrouted: false,
+            sourceType: RoutingSourceType::Topic
+        );
+
+        self::assertSame(1, $oneWord->routeCount());
+        self::assertSame($destination->id, $oneWord->routes[0]->destinationId);
+        self::assertSame(0, $zeroWords->routeCount());
+        self::assertSame(0, $multipleWords->routeCount());
+    }
+
+    public function testTopicDeduplicatesDestinationWhenSeveralBindingsMatch(): void
+    {
+        $destination = $this->bindDestination('events.topic', 'orders.*', 'orders');
+        $this->bindings->create($this->defaultVirtualHostId, 'events.topic', $destination->id, 'orders.#');
+        $this->bindings->create($this->defaultVirtualHostId, 'events.topic', $destination->id, '#.created');
+        $this->subscriptions->create($destination->id, 'worker-a');
+
+        $result = $this->publisher->publish(
+            $this->defaultVirtualHostId,
+            'events.topic',
+            'orders.created',
+            'payload',
+            persistUnrouted: false,
+            sourceType: RoutingSourceType::Topic
+        );
+
+        self::assertSame(1, $this->tableCount('messages'));
+        self::assertSame(1, $result->routeCount());
+        self::assertSame(1, $result->deliveryCount());
+        self::assertSame($destination->id, $result->routes[0]->destinationId);
+    }
+
+    public function testTopicQueueDepthLimitKeepsMultiDestinationPublishAtomic(): void
+    {
+        $orders = $this->bindDestination('events.topic', 'orders.*', 'orders');
+        $audit = $this->bindDestination('events.topic', '#.failed', 'audit');
+        $this->subscriptions->create($orders->id, 'worker-orders');
+        $this->subscriptions->create($audit->id, 'worker-audit');
+        $this->publisher->publishToDestination($audit->id, 'already-full');
+        $before = $this->graphCounts();
+        $publisher = new PublishTransaction($this->connection, new ResourceLimits(maxQueueDepth: 1));
+
+        try {
+            $publisher->publish(
+                $this->defaultVirtualHostId,
+                'events.topic',
+                'orders.failed',
+                'payload',
+                persistUnrouted: false,
+                sourceType: RoutingSourceType::Topic
+            );
+            self::fail('A full topic destination should reject the whole publish.');
+        } catch (ResourceLimitException) {
+            self::assertSame($before, $this->graphCounts());
+        }
+    }
+
     public function testBindingUniquenessPreventsDuplicateRouteInputs(): void
     {
         $destination = $this->bindDestination('orders', 'order.created');

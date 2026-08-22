@@ -149,6 +149,27 @@ final class BrokerTopologyManagementTest extends TestCase
         }
     }
 
+    public function testTopicRoutingSourceDeclarationRedeclarationAndIncompatibility(): void
+    {
+        $topic = $this->broker->declareTopicRoutingSource('/', 'events.topic', true, false);
+        $again = $this->broker->declareTopicRoutingSource('/', 'events.topic', true, false);
+
+        self::assertSame($topic->id, $again->id);
+        self::assertSame(RoutingSourceType::Topic, $again->type);
+
+        foreach ([
+            'direct' => fn () => $this->broker->declareDirectRoutingSource('/', 'events.topic', true, false),
+            'fanout' => fn () => $this->broker->declareFanoutRoutingSource('/', 'events.topic', true, false),
+        ] as $type => $declare) {
+            try {
+                $declare();
+                self::fail(sprintf('Redeclaring a topic routing source as %s should fail.', $type));
+            } catch (TopologyException $exception) {
+                self::assertSame(TopologyException::PRECONDITION_FAILED, $exception->reason);
+            }
+        }
+    }
+
     public function testFanoutBindPublishUnbindAndDelete(): void
     {
         $orders = $this->broker->declareQueue('/', 'orders', true, false);
@@ -176,6 +197,33 @@ final class BrokerTopologyManagementTest extends TestCase
         $this->broker->deleteRoutingSource('/', 'events');
         self::assertNull($this->routingSources->findByName($this->virtualHostId, 'events'));
         self::assertSame(0, $this->bindings->countBySource($this->virtualHostId, 'events'));
+    }
+
+    public function testTopicBindPublishUnbindAndDelete(): void
+    {
+        $orders = $this->broker->declareQueue('/', 'orders', true, false);
+        $audit = $this->broker->declareQueue('/', 'audit', true, false);
+        $this->broker->declareTopicRoutingSource('/', 'events.topic', true, false);
+        $this->broker->bindQueue('/', 'events.topic', 'orders', 'orders.*');
+        $this->broker->bindQueue('/', 'events.topic', 'audit', '#.failed');
+
+        $result = $this->broker->publish(new PublishRequest('/', 'events.topic', 'orders.failed', 'payload', persistUnrouted: false));
+
+        self::assertSame(1, $this->tableCount('messages'));
+        self::assertSame(2, $result->routeCount());
+        self::assertEqualsCanonicalizing(
+            [$orders->id, $audit->id],
+            array_map(static fn ($route): int => $route->destinationId, $result->routes)
+        );
+
+        $this->broker->unbindQueue('/', 'events.topic', 'audit', '#.failed');
+        $afterUnbind = $this->broker->publish(new PublishRequest('/', 'events.topic', 'orders.failed', 'payload', persistUnrouted: false));
+        self::assertSame(1, $afterUnbind->routeCount());
+        self::assertSame($orders->id, $afterUnbind->routes[0]->destinationId);
+
+        $this->broker->deleteRoutingSource('/', 'events.topic');
+        self::assertNull($this->routingSources->findByName($this->virtualHostId, 'events.topic'));
+        self::assertSame(0, $this->bindings->countBySource($this->virtualHostId, 'events.topic'));
     }
 
     private function createDelivery(Destination $destination, string $payload): void

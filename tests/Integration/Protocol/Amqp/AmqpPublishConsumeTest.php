@@ -331,6 +331,118 @@ final class AmqpPublishConsumeTest extends TestCase
         }
     }
 
+    public function testTopicPublishRoutesToMatchingQueuesAndSupportsGetAndConsume(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            foreach (['orders-one', 'orders-all', 'failed', 'unbound'] as $queue) {
+                $this->sendMethod($client, 1, 50, 10, $this->queueDeclare($queue));
+                self::assertSame([50, 11], $this->readMethod($listener, $client));
+            }
+            $this->sendMethod($client, 1, 40, 10, $this->exchangeDeclare('events.topic', 'topic'));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('orders-one', 'events.topic', 'orders.*'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('orders-all', 'events.topic', 'orders.#'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('failed', 'events.topic', '*.failed'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, 'events.topic', 'orders.failed', 'topic-body', mandatory: true);
+            $ack = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 80], $ack->method());
+            self::assertSame(1, $this->deliveryTagFromBasicAck($ack));
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(3, $this->tableCount('message_routes'));
+            self::assertSame(3, $this->tableCount('deliveries'));
+
+            foreach (['orders-one', 'orders-all', 'failed'] as $queue) {
+                $this->sendMethod($client, 1, 60, 70, $this->basicGet($queue, noAck: true));
+                self::assertSame([60, 71], $this->readMethod($listener, $client));
+                self::assertSame(Frame::TYPE_HEADER, $this->readFrame($listener, $client)->type);
+                self::assertSame('topic-body', $this->readFrame($listener, $client)->payload);
+            }
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('unbound', noAck: true));
+            self::assertSame([60, 72], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, 'events.topic', 'orders.created', 'consume-body');
+            self::assertSame(2, $this->deliveryTagFromBasicAck($this->readMethodFrame($listener, $client)));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders-one', 'topic-consumer'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertSame('consume-body', $this->readDeliveryBody($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testDeniedTopicPublishClosesChannelWithAccessRefused(): void
+    {
+        $broker = $this->broker();
+        $broker->declareQueue('/', 'orders', true, false);
+        $broker->declareTopicRoutingSource('/', 'events.topic', true, false);
+        $broker->bindQueue('/', 'events.topic', 'orders', 'orders.#');
+        (new UserRepository($this->connection))->setPermissions('guest', '/', '.*', '^allowed$', '.*');
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('events.topic', 'orders.created'));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(403, $this->replyCode($close));
+            self::assertSame(0, $this->tableCount('messages'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testTopicPublishResourceFailureRollsBackAndDoesNotConfirm(): void
+    {
+        [$listener, $client] = $this->startedListener(limits: new ResourceLimits(maxQueueDepth: 1));
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            foreach (['orders', 'audit'] as $queue) {
+                $this->sendMethod($client, 1, 50, 10, $this->queueDeclare($queue));
+                self::assertSame([50, 11], $this->readMethod($listener, $client));
+            }
+            $this->sendMethod($client, 1, 40, 10, $this->exchangeDeclare('events.topic', 'topic'));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('orders', 'events.topic', 'orders.*'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 20, $this->queueBind('audit', 'events.topic', '#.failed'));
+            self::assertSame([50, 21], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, '', 'audit', 'already-full');
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(1, $this->tableCount('message_routes'));
+            self::assertSame(1, $this->tableCount('deliveries'));
+
+            $this->sendMethod($client, 1, 85, 10, $this->confirmSelect(false));
+            self::assertSame([85, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, 'events.topic', 'orders.failed', 'blocked', mandatory: true);
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(506, $this->replyCode($close));
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(1, $this->tableCount('message_routes'));
+            self::assertSame(1, $this->tableCount('deliveries'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testUnroutableMandatoryPublishReturnsOriginalMessageAndThenConfirms(): void
     {
         [$listener, $client] = $this->startedListener();

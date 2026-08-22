@@ -8,4 +8,5 @@ enum RoutingSourceType: string
 {
     case Direct = 'direct';
     case Fanout = 'fanout';
+    case Topic = 'topic';
 }

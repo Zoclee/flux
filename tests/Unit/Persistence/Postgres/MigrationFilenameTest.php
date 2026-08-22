@@ -55,6 +55,7 @@ final class MigrationFilenameTest extends TestCase
                 '20260820_120011_create_users.sql',
                 '20260820_120012_create_user_permissions.sql',
                 '20260820_120013_allow_fanout_routing_sources.sql',
+                '20260820_120014_allow_topic_routing_sources.sql',
             ],
             Migrator::discoverMigrationFilenames(dirname(__DIR__, 4) . '/database/migrations')
         );

@@ -9,12 +9,14 @@ use Flux\Broker\PublishResult;
 use Flux\Broker\ResourceLimitException;
 use Flux\Broker\ResourceLimits;
 use Flux\Broker\RoutingSourceType;
+use Flux\Broker\TopicMatcher;
 use PDO;
 
 final readonly class PublishTransaction
 {
     private MessageRepository $messages;
     private BindingRepository $bindings;
+    private TopicMatcher $topics;
     private MessageRouteRepository $routes;
     private SubscriptionRepository $subscriptions;
     private DeliveryRepository $deliveries;
@@ -26,6 +28,7 @@ final readonly class PublishTransaction
     {
         $this->messages = new MessageRepository($connection);
         $this->bindings = new BindingRepository($connection);
+        $this->topics = new TopicMatcher();
         $this->routes = new MessageRouteRepository($connection);
         $this->subscriptions = new SubscriptionRepository($connection);
         $this->deliveries = new DeliveryRepository($connection);
@@ -65,6 +68,7 @@ final readonly class PublishTransaction
             $bindings = match ($sourceType) {
                 RoutingSourceType::Direct => $this->bindings->findForRoute($virtualHostId, $source, $routingKey),
                 RoutingSourceType::Fanout => $this->bindings->findForSource($virtualHostId, $source),
+                RoutingSourceType::Topic => $this->topicBindings($virtualHostId, $source, $routingKey),
             };
             $destinationIds = $this->uniqueDestinationIds($bindings);
             if ($destinationIds === [] && !$persistUnrouted) {
@@ -143,6 +147,17 @@ final readonly class PublishTransaction
 
             return new PublishResult($message, [$route], $deliveries);
         });
+    }
+
+    /**
+     * @return list<Binding>
+     */
+    private function topicBindings(int $virtualHostId, string $source, string $routingKey): array
+    {
+        return array_values(array_filter(
+            $this->bindings->findForSource($virtualHostId, $source),
+            fn (Binding $binding): bool => $this->topics->matches($binding->routingKey, $routingKey)
+        ));
     }
 
     /**

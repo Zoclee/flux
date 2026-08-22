@@ -294,6 +294,23 @@ final readonly class Broker
         );
     }
 
+    public function declareTopicRoutingSource(
+        string $virtualHostName,
+        string $name,
+        bool $durable,
+        bool $autoDelete,
+        bool $passive = false
+    ): RoutingSource {
+        return $this->declareRoutingSource(
+            $virtualHostName,
+            $name,
+            RoutingSourceType::Topic,
+            $durable,
+            $autoDelete,
+            $passive
+        );
+    }
+
     private function declareRoutingSource(
         string $virtualHostName,
         string $name,

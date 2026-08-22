@@ -135,7 +135,7 @@ final class AmqpTopologyTest extends TestCase
 
         try {
             $this->connectAndOpenChannel($listener, $client, 1);
-            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('orders.topic', 'topic'))));
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('orders.headers', 'headers'))));
 
             self::assertSame([20, 40], $this->readMethod($listener, $client));
         } finally {
@@ -167,6 +167,29 @@ final class AmqpTopologyTest extends TestCase
         self::assertTrue($source->durable);
     }
 
+    public function testTopicExchangeDeclareAndCompatibleRedeclare(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events.topic', 'topic', durable: true))));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events.topic', 'topic', durable: true))));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        $source = (new RoutingSourceRepository($this->connection))->findByName($this->virtualHostId, 'events.topic');
+        self::assertNotNull($source);
+        self::assertSame('topic', $source->type->value);
+        self::assertTrue($source->durable);
+    }
+
     public function testIncompatibleDirectFanoutRedeclarationClosesChannel(): void
     {
         [$listener, $client] = $this->startedListener();
@@ -178,6 +201,27 @@ final class AmqpTopologyTest extends TestCase
             self::assertSame([40, 11], $this->readMethod($listener, $client));
 
             fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'fanout'))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testIncompatibleTopicRedeclarationClosesChannel(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'topic'))));
+            self::assertSame([40, 11], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 10, $this->exchangeDeclare('events', 'direct'))));
             $close = $this->readMethodFrame($listener, $client);
 
             self::assertSame([20, 40], $close->method());
