@@ -18,6 +18,8 @@ final class ApplicationTest extends TestCase
         self::assertStringContainsString('Usage:', $output);
         self::assertStringContainsString('db:status', $output);
         self::assertStringContainsString('migrate', $output);
+        self::assertStringContainsString('health', $output);
+        self::assertStringContainsString('readiness', $output);
         self::assertStringContainsString('server:start', $output);
         self::assertStringContainsString('vhost:list', $output);
         self::assertStringContainsString('queue:list', $output);

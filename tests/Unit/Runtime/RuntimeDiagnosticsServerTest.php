@@ -109,6 +109,7 @@ final class RuntimeDiagnosticsServerTest extends TestCase
             self::assertSame(0, $stats['data']['consumers']);
             self::assertSame('unknown', $stats['data']['state']);
             self::assertSame(0, $stats['data']['unacked']);
+            self::assertSame([], $stats['data']['listeners']);
             self::assertSame(7, $stats['data']['limits']['max_connections']);
             self::assertSame(11, $stats['data']['limits']['max_queue_depth']);
         } finally {
@@ -123,7 +124,10 @@ final class RuntimeDiagnosticsServerTest extends TestCase
             new ConsumerRegistry(),
             port: 0,
             stateProvider: static fn (): RuntimeState => RuntimeState::Draining,
-            unackedProvider: static fn (): int => 2
+            unackedProvider: static fn (): int => 2,
+            listenersProvider: static fn (): array => [
+                'amqp' => ['enabled' => true, 'running' => false],
+            ]
         );
         $server->start();
 
@@ -133,6 +137,7 @@ final class RuntimeDiagnosticsServerTest extends TestCase
             self::assertTrue($stats['ok']);
             self::assertSame('draining', $stats['data']['state']);
             self::assertSame(2, $stats['data']['unacked']);
+            self::assertSame(['enabled' => true, 'running' => false], $stats['data']['listeners']['amqp']);
         } finally {
             $server->stop();
         }

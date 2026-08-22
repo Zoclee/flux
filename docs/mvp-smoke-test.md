@@ -1,0 +1,58 @@
+# Flux MVP Smoke Test
+
+This is a short manual check for a local MVP release candidate. It assumes PHP, Composer, PostgreSQL, and the PHP `pdo_pgsql` extension are available.
+
+## Setup
+
+```bash
+composer install
+php flux migrate
+php flux user:create testuser
+php flux user:grant-vhost testuser /
+php flux user:set-permissions testuser / ".*" ".*" ".*"
+```
+
+`user:create` prompts for the password. Use that same password in the AMQP client connection URL below.
+
+Start Flux in one terminal:
+
+```bash
+php flux server:start
+```
+
+From another terminal:
+
+```bash
+php flux health
+php flux readiness
+php flux broker:stats
+```
+
+Expected result: health reports `Runtime: healthy`, readiness reports `Ready: yes`, and broker stats reports `Runtime` state `Running`.
+
+## AMQP Check
+
+Use any AMQP 0-9-1 client that supports username/password authentication. Connect to:
+
+```text
+amqp://testuser:<password>@127.0.0.1:5672/
+```
+
+If TLS is enabled and certificate paths are configured, connect to:
+
+```text
+amqps://testuser:<password>@127.0.0.1:5671/
+```
+
+Minimal client flow:
+
+```text
+1. open connection and channel
+2. declare queue "smoke.orders"
+3. publish one binary-safe message to the default exchange with routing key "smoke.orders"
+4. consume or basic.get from "smoke.orders"
+5. acknowledge the delivery
+6. optionally enable publisher confirms and verify a basic.ack confirm is received after publish
+```
+
+Stop the server with Ctrl+C. Flux should enter draining shutdown and exit cleanly.

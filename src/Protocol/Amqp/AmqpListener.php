@@ -200,6 +200,11 @@ final class AmqpListener implements RuntimeDrainingComponent
         return $this->tls !== null;
     }
 
+    public function isListening(): bool
+    {
+        return is_resource($this->server);
+    }
+
     private function completePendingTlsHandshakes(): void
     {
         foreach ($this->pendingTlsClients as $key => $client) {

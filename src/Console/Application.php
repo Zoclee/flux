@@ -10,10 +10,12 @@ use Flux\Console\Commands\BindingListCommand;
 use Flux\Console\Commands\BrokerStatsCommand;
 use Flux\Console\Commands\ConnectionListCommand;
 use Flux\Console\Commands\ConsumerListCommand;
+use Flux\Console\Commands\HealthCommand;
 use Flux\Console\Commands\MigrateCommand;
 use Flux\Console\Commands\MessagePeekCommand;
 use Flux\Console\Commands\QueueListCommand;
 use Flux\Console\Commands\QueueShowCommand;
+use Flux\Console\Commands\ReadinessCommand;
 use Flux\Console\Commands\ReadOnlyDatabaseContext;
 use Flux\Console\Commands\ServerStartCommand;
 use Flux\Console\Commands\SubscriptionListCommand;
@@ -54,6 +56,8 @@ final class Application
             '--version', '-V' => $this->showVersion($output),
             'db:status' => $this->dbStatus($output),
             'migrate' => $this->migrate($output),
+            'health' => $this->health($output),
+            'readiness' => $this->readiness($output),
             'server:start' => $this->serverStart($output),
             'connection:list' => $this->runtimeCommand(ConnectionListCommand::class, $output),
             'consumer:list' => $this->runtimeCommand(ConsumerListCommand::class, $output),
@@ -94,6 +98,8 @@ Database:
   migrate               Apply pending PostgreSQL database migrations
 
 Server:
+  health                Check local runtime health
+  readiness             Check whether Flux can accept broker traffic
   server:start          Start the Flux broker runtime
   connection:list       List active runtime connections
   consumer:list         List active runtime consumers
@@ -228,6 +234,53 @@ HELP);
             amqpTlsKey: isset($amqpTlsConfig['key']) ? (string) $amqpTlsConfig['key'] : null,
             amqpTlsCa: isset($amqpTlsConfig['ca']) && $amqpTlsConfig['ca'] !== '' ? (string) $amqpTlsConfig['ca'] : null,
             drainTimeoutSeconds: (int) ($shutdownConfig['drain_timeout'] ?? 30)
+        ))->run($output);
+    }
+
+    /**
+     * @param resource $output
+     */
+    private function health(mixed $output): int
+    {
+        try {
+            [, $config] = $this->projectContext();
+            $diagnosticsConfig = $config['diagnostics'] ?? [];
+        } catch (Throwable $exception) {
+            $this->write($output, "Flux Health\n\n");
+            $this->write($output, "Runtime: unavailable\n");
+            $this->write($output, sprintf("ERROR: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        return (new HealthCommand($this->diagnosticsClient($diagnosticsConfig)))->run($output);
+    }
+
+    /**
+     * @param resource $output
+     */
+    private function readiness(mixed $output): int
+    {
+        try {
+            [$projectRoot, $config] = $this->projectContext();
+            $databaseConfig = ConnectionConfig::fromArray($config['database']);
+            $diagnosticsConfig = $config['diagnostics'] ?? [];
+            $amqpConfig = $config['amqp'] ?? [];
+            $amqpTlsConfig = is_array($amqpConfig['tls'] ?? null) ? $amqpConfig['tls'] : [];
+        } catch (Throwable $exception) {
+            $this->write($output, "Flux Readiness\n\n");
+            $this->write($output, "Ready: no\n");
+            $this->write($output, sprintf("Reason: %s\n", $exception->getMessage()));
+
+            return 1;
+        }
+
+        return (new ReadinessCommand(
+            $this->diagnosticsClient($diagnosticsConfig),
+            $databaseConfig,
+            $projectRoot . '/database/migrations',
+            (bool) ($amqpConfig['enabled'] ?? true),
+            (bool) ($amqpTlsConfig['enabled'] ?? false)
         ))->run($output);
     }
 

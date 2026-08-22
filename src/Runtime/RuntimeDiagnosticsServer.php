@@ -35,7 +35,8 @@ final class RuntimeDiagnosticsServer implements RuntimeComponent
         private int $port = 5673,
         private readonly ?ResourceLimits $limits = null,
         private readonly mixed $stateProvider = null,
-        private readonly mixed $unackedProvider = null
+        private readonly mixed $unackedProvider = null,
+        private readonly mixed $listenersProvider = null
     ) {
         if ($this->host === '') {
             throw new RuntimeException('Runtime diagnostics host must not be empty.');
@@ -150,6 +151,7 @@ final class RuntimeDiagnosticsServer implements RuntimeComponent
                 'connections' => $this->connections->count(),
                 'consumers' => $this->consumers->count(),
                 'unacked' => $this->unackedCount(),
+                'listeners' => $this->listenersData(),
                 'limits' => $this->limitsData(),
             ]],
             'connections' => ['ok' => true, 'data' => array_map(
@@ -213,6 +215,20 @@ final class RuntimeDiagnosticsServer implements RuntimeComponent
         }
 
         return 0;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function listenersData(): array
+    {
+        if (is_callable($this->listenersProvider)) {
+            $listeners = ($this->listenersProvider)();
+
+            return is_array($listeners) ? $listeners : [];
+        }
+
+        return [];
     }
 
     /**

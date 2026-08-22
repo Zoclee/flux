@@ -6,6 +6,9 @@ namespace Flux\Tests\Unit\Console;
 
 use Flux\Console\Commands\ConnectionListCommand;
 use Flux\Console\Commands\ConsumerListCommand;
+use Flux\Console\Commands\HealthCommand;
+use Flux\Console\Commands\ReadinessCommand;
+use Flux\Persistence\Postgres\ConnectionConfig;
 use Flux\Runtime\RuntimeDiagnostics;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
@@ -59,6 +62,50 @@ final class DiagnosticsCommandTest extends TestCase
         self::assertSame("Runtime: unavailable\n", $consumerOutput);
     }
 
+    public function testHealthReportsUnavailableRuntime(): void
+    {
+        [$exitCode, $output] = $this->runCommand(new HealthCommand(new FakeRuntimeDiagnostics(unavailable: true)));
+
+        self::assertSame(1, $exitCode);
+        self::assertStringContainsString('Flux Health', $output);
+        self::assertStringContainsString('Runtime: unavailable', $output);
+    }
+
+    public function testHealthReportsHealthyRuntime(): void
+    {
+        [$exitCode, $output] = $this->runCommand(new HealthCommand(new FakeRuntimeDiagnostics(state: 'running')));
+
+        self::assertSame(0, $exitCode);
+        self::assertStringContainsString('Runtime: healthy', $output);
+        self::assertStringContainsString('State:   Running', $output);
+    }
+
+    public function testReadinessFailsWhenRuntimeIsUnavailable(): void
+    {
+        [$exitCode, $output] = $this->runCommand(new ReadinessCommand(
+            new FakeRuntimeDiagnostics(unavailable: true),
+            new ConnectionConfig('127.0.0.1', 5432, 'unused', 'unused', null),
+            __DIR__
+        ));
+
+        self::assertSame(1, $exitCode);
+        self::assertStringContainsString('Ready: no', $output);
+        self::assertStringContainsString('Reason: runtime unavailable', $output);
+    }
+
+    public function testReadinessFailsWhenRuntimeIsDraining(): void
+    {
+        [$exitCode, $output] = $this->runCommand(new ReadinessCommand(
+            new FakeRuntimeDiagnostics(state: 'draining'),
+            new ConnectionConfig('127.0.0.1', 5432, 'unused', 'unused', null),
+            __DIR__
+        ));
+
+        self::assertSame(1, $exitCode);
+        self::assertStringContainsString('Ready: no', $output);
+        self::assertStringContainsString('Reason: runtime is draining', $output);
+    }
+
     /**
      * @return array{0: int, 1: string}
      */
@@ -86,7 +133,12 @@ final readonly class FakeRuntimeDiagnostics implements RuntimeDiagnostics
         private array $connections = [],
         private array $consumers = [],
         private array $limits = [],
-        private bool $unavailable = false
+        private bool $unavailable = false,
+        private string $state = 'running',
+        private array $listeners = [
+            'amqp' => ['enabled' => true, 'running' => true],
+            'amqp_tls' => ['enabled' => false, 'running' => false],
+        ]
     ) {
     }
 
@@ -97,9 +149,11 @@ final readonly class FakeRuntimeDiagnostics implements RuntimeDiagnostics
         }
 
         return [
+            'state' => $this->state,
             'connections' => count($this->connections),
             'consumers' => count($this->consumers),
             'limits' => $this->limits,
+            'listeners' => $this->listeners,
         ];
     }
 

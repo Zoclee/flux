@@ -234,8 +234,11 @@ final class ServerStartCommand
         }
 
         $components = [];
+        $amqpListener = null;
+        $amqpTlsListener = null;
+
         if ($this->amqpEnabled) {
-            $components[] = new AmqpListener(
+            $amqpListener = new AmqpListener(
                 $connections,
                 $this->amqpHost,
                 $this->amqpPort,
@@ -248,10 +251,11 @@ final class ServerStartCommand
                 heartbeatInterval: $this->amqpHeartbeat,
                 limits: $this->limits
             );
+            $components[] = $amqpListener;
         }
 
         if ($tlsConfig !== null) {
-            $components[] = new AmqpListener(
+            $amqpTlsListener = new AmqpListener(
                 $connections,
                 $this->amqpTlsHost,
                 $this->amqpTlsPort,
@@ -265,6 +269,7 @@ final class ServerStartCommand
                 tls: $tlsConfig,
                 limits: $this->limits
             );
+            $components[] = $amqpTlsListener;
         }
 
         $runtime = null;
@@ -274,8 +279,26 @@ final class ServerStartCommand
             $this->diagnosticsHost,
             $this->diagnosticsPort,
             $this->limits,
-            stateProvider: static fn (): string => $runtime?->state()->value ?? 'starting',
-            unackedProvider: static fn (): int => $runtime?->unackedCount() ?? 0
+            stateProvider: static function () use (&$runtime): string {
+                return $runtime?->state()->value ?? 'starting';
+            },
+            unackedProvider: static function () use (&$runtime): int {
+                return $runtime?->unackedCount() ?? 0;
+            },
+            listenersProvider: static fn (): array => [
+                'amqp' => [
+                    'enabled' => $amqpListener !== null,
+                    'running' => $amqpListener?->isListening() ?? false,
+                    'host' => $amqpListener?->host(),
+                    'port' => $amqpListener?->port(),
+                ],
+                'amqp_tls' => [
+                    'enabled' => $amqpTlsListener !== null,
+                    'running' => $amqpTlsListener?->isListening() ?? false,
+                    'host' => $amqpTlsListener?->host(),
+                    'port' => $amqpTlsListener?->port(),
+                ],
+            ]
         );
 
         $runtime = new BrokerRuntime(

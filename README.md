@@ -1,8 +1,45 @@
 # Flux
 
-Flux is an unified message broker with PostgreSQL persistence.
+Flux is a unified message broker with PostgreSQL persistence.
 
-Flux is currently pre-MVP. Phase 3.3 supports a minimal AMQP 0-9-1 MVP: TCP connection handshake, runtime-only channels, queue declarations, direct exchange declarations, exact queue bindings, basic publishing, basic consuming, acknowledgements, and rejects. Production authentication and advanced AMQP topology are not implemented yet.
+Flux is currently at an MVP release-candidate stopping point. The first supported protocol adapter is AMQP 0-9-1, backed by the protocol-neutral Broker core and PostgreSQL persistence.
+
+## MVP Capabilities
+
+- PostgreSQL-backed persistence
+- `flux` CLI migrations and administrative diagnostics
+- AMQP 0-9-1 connection/channel handshake
+- queue declare/delete/purge
+- direct exchange declare/delete
+- queue bind/unbind
+- `basic.publish`
+- `basic.consume`
+- `basic.get`
+- `basic.ack`, `basic.reject`, and `basic.nack`
+- `basic.qos` prefetch-count enforcement
+- minimal individual publisher confirms
+- heartbeats and disconnect cleanup
+- plaintext AMQP listener
+- TLS AMQP listener
+- username/password authentication
+- per-vhost `configure`, `write`, and `read` authorization
+- retry and dead-letter handling
+- resource limits and overload protection
+- graceful bounded draining/shutdown
+- local runtime diagnostics plus CLI health/readiness checks
+
+## Known Limitations
+
+- no clustering or replication
+- no MQTT or Kafka adapters yet
+- no topic, fanout, or headers exchanges
+- no AMQP transactions
+- no mandatory returns or alternate exchanges
+- no management UI or HTTP health endpoints
+- no Prometheus/OpenTelemetry metrics subsystem
+- no systemd, Docker, or process-supervisor packaging
+- no mutual TLS or certificate-based user authentication
+- no rolling restart or zero-downtime upgrade workflow
 
 ## Requirements
 
@@ -26,6 +63,8 @@ php flux help
 php flux --version
 php flux db:status
 php flux migrate
+php flux health
+php flux readiness
 php flux server:start
 php flux connection:list
 php flux consumer:list
@@ -44,14 +83,16 @@ The intended Composer-installed command format is:
 flux <command>
 ```
 
-Queue, binding, subscription, and message commands are administrative inspection commands over persisted state. Flux is not yet a functional network broker.
+Queue, binding, subscription, and message commands are administrative inspection commands over persisted state.
+
+`php flux health` checks whether the local runtime diagnostics endpoint is reachable and currently running. `php flux readiness` additionally checks that Flux is ready to accept broker traffic, including runtime state, listener status, database connectivity, and migration status.
 
 ## Broker API
 
 Flux now exposes publishing through the protocol-neutral `Flux\Broker\Broker` service. It also has a foreground, long-running protocol-neutral runtime that can host future protocol adapters:
 
 ```text
-Protocol adapters (future)
+Protocol adapters
         |
    Broker Runtime
         |
@@ -70,21 +111,46 @@ The runtime can be started with:
 php flux server:start
 ```
 
-It verifies PostgreSQL connectivity, starts the in-memory runtime registries, starts the AMQP 0-9-1 listener, and remains in the foreground until shutdown.
+It verifies PostgreSQL connectivity, starts the in-memory runtime registries, starts enabled AMQP listeners and local diagnostics, and remains in the foreground until shutdown.
 
-The AMQP listener defaults to `127.0.0.1:5672` and can be configured with:
+The plaintext AMQP listener defaults to `127.0.0.1:5672` and can be configured with:
 
 ```text
+FLUX_AMQP_ENABLED
 FLUX_AMQP_HOST
 FLUX_AMQP_PORT
 FLUX_AMQP_HEARTBEAT
-FLUX_DIAGNOSTICS_HOST
-FLUX_DIAGNOSTICS_PORT
 ```
 
-AMQP authentication is a development placeholder only. The listener advertises `PLAIN` so basic clients can complete the connection handshake, but Flux does not yet implement production authentication, ACLs, or permissions.
+The TLS AMQP listener is disabled by default and can be configured with:
+
+```text
+FLUX_AMQP_TLS_ENABLED
+FLUX_AMQP_TLS_HOST
+FLUX_AMQP_TLS_PORT
+FLUX_AMQP_TLS_CERT
+FLUX_AMQP_TLS_KEY
+FLUX_AMQP_TLS_CA
+```
+
 `FLUX_AMQP_HEARTBEAT` defaults to `60` seconds. Set it to `0` to disable heartbeat negotiation and timeout cleanup.
-Runtime diagnostics are exposed through a small read-only local socket used by `connection:list`, `consumer:list`, and `broker:stats`. It defaults to `127.0.0.1:5673` and does not expose message payloads or mutation commands.
+Runtime diagnostics are exposed through a small read-only local socket used by `health`, `readiness`, `connection:list`, `consumer:list`, and `broker:stats`. It defaults to `127.0.0.1:5673` and does not expose credentials, message payloads, or mutation commands.
+
+Authentication uses persisted username/password credentials. Authorization uses persisted per-vhost `configure`, `write`, and `read` regex permissions.
+
+Resource limits and graceful shutdown can be configured with:
+
+```text
+FLUX_MAX_CONNECTIONS
+FLUX_MAX_CHANNELS_PER_CONNECTION
+FLUX_MAX_CONSUMERS_PER_CONNECTION
+FLUX_MAX_CONSUMERS_PER_CHANNEL
+FLUX_AMQP_MAX_FRAME_SIZE
+FLUX_MAX_MESSAGE_SIZE
+FLUX_MAX_QUEUES_PER_VHOST
+FLUX_MAX_QUEUE_DEPTH
+FLUX_SHUTDOWN_DRAIN_TIMEOUT
+```
 
 ### Database Migrations
 
@@ -125,6 +191,10 @@ FLUX_DB_PASSWORD=secret
 ```
 
 Values already present in the process environment take precedence over `.env`.
+
+## MVP Smoke Test
+
+See `docs/mvp-smoke-test.md` for a short manual smoke-test path that covers installation, migrations, user/vhost permissions, runtime startup, health/readiness, and a minimal AMQP publish/consume flow.
 
 ## Tests
 
@@ -178,9 +248,9 @@ Live consumers, TCP connections, channels, sockets, and runtime statistics are n
 - `src/Broker/` - protocol-neutral broker core
 - `src/Console/` - CLI application commands
 - `src/Persistence/` - persistence abstractions and implementations
-- `src/Persistence/Postgres/` - future PostgreSQL persistence implementation
+- `src/Persistence/Postgres/` - PostgreSQL persistence implementation
 - `src/Protocol/` - protocol adapters
-- `src/Protocol/Amqp/` - future minimal AMQP 0-9-1 adapter
+- `src/Protocol/Amqp/` - AMQP 0-9-1 adapter
 - `src/Support/` - small shared infrastructure
 - `tests/` - unit, integration, and fixture files
 - `var/` - runtime logs and process files
