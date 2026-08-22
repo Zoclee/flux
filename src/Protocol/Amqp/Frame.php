@@ -11,6 +11,7 @@ final readonly class Frame
     public const TYPE_METHOD = 1;
     public const TYPE_HEADER = 2;
     public const TYPE_BODY = 3;
+    public const TYPE_HEARTBEAT = 8;
 
     public function __construct(
         public int $type,
@@ -29,6 +30,11 @@ final readonly class Frame
     public static function methodFrame(int $channel, int $classId, int $methodId, string $arguments = ''): self
     {
         return new self(self::TYPE_METHOD, $channel, pack('nn', $classId, $methodId) . $arguments);
+    }
+
+    public static function heartbeatFrame(): self
+    {
+        return new self(self::TYPE_HEARTBEAT, 0, '');
     }
 
     /**

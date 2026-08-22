@@ -28,7 +28,9 @@ final class AmqpListener implements RuntimeComponent
         private int $port = 5672,
         private readonly int $maxFrameSize = 131072,
         private readonly ?Broker $broker = null,
-        private readonly ?ConsumerRegistry $consumers = null
+        private readonly ?ConsumerRegistry $consumers = null,
+        private readonly int $heartbeatInterval = 60,
+        private readonly mixed $clock = null
     ) {
         if ($this->host === '') {
             throw new RuntimeException('AMQP listener host must not be empty.');
@@ -36,6 +38,10 @@ final class AmqpListener implements RuntimeComponent
 
         if ($this->port < 0 || $this->port > 65535) {
             throw new RuntimeException('AMQP listener port must be between 0 and 65535.');
+        }
+
+        if ($this->heartbeatInterval < 0 || $this->heartbeatInterval > 65535) {
+            throw new RuntimeException('AMQP heartbeat interval must fit in an unsigned short.');
         }
     }
 
@@ -79,7 +85,9 @@ final class AmqpListener implements RuntimeComponent
                 $this->runtimeConnections,
                 $this->maxFrameSize,
                 $this->broker,
-                $this->consumers
+                $this->consumers,
+                heartbeatInterval: $this->heartbeatInterval,
+                clock: $this->clock
             );
         }
 

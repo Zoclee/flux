@@ -56,8 +56,9 @@ final class AmqpConnectionTest extends TestCase
         $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11)));
         self::assertSame(AmqpConnectionState::Tuning, $connection->state());
 
-        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31)));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(60))));
         self::assertSame(AmqpConnectionState::Opening, $connection->state());
+        self::assertSame(60, $connection->negotiatedHeartbeatInterval());
 
         $connection->receive($codec->encode(Frame::methodFrame(0, 10, 40)));
         self::assertSame(AmqpConnectionState::Open, $connection->state());
@@ -142,15 +143,51 @@ final class AmqpConnectionTest extends TestCase
         $connection->receive((new FrameCodec())->encode(new Frame(Frame::TYPE_METHOD, 1, "\x00")));
     }
 
+    public function testHeartbeatValueNegotiatesToLowerNonZeroInterval(): void
+    {
+        [$connection, $socket] = $this->connection(60);
+        $codec = new FrameCodec();
+
+        $connection->receive(AmqpConnection::PROTOCOL_HEADER);
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11)));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(10))));
+
+        self::assertSame(10, $connection->negotiatedHeartbeatInterval());
+        self::assertSame(60, $this->heartbeatFromTune($socket));
+    }
+
+    public function testHeartbeatCanBeDisabledWithZero(): void
+    {
+        [$connection] = $this->connection(60);
+        $codec = new FrameCodec();
+
+        $connection->receive(AmqpConnection::PROTOCOL_HEADER);
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11)));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(0))));
+
+        self::assertSame(0, $connection->negotiatedHeartbeatInterval());
+    }
+
+    public function testMalformedHeartbeatFrameIsRejected(): void
+    {
+        [$connection] = $this->connection();
+        $this->completeHandshake($connection);
+
+        $this->expectException(ProtocolException::class);
+        $this->expectExceptionMessage('AMQP heartbeat frames must use channel 0 with an empty payload.');
+
+        $connection->receive((new FrameCodec())->encode(new Frame(Frame::TYPE_HEARTBEAT, 1, 'x')));
+    }
+
     /**
      * @return array{0: AmqpConnection, 1: resource}
      */
-    private function connection(): array
+    private function connection(int $heartbeatInterval = 60): array
     {
         $socket = fopen('php://temp', 'w+');
         self::assertIsResource($socket);
 
-        return [new AmqpConnection($socket, new ConnectionRegistry()), $socket];
+        return [new AmqpConnection($socket, new ConnectionRegistry(), heartbeatInterval: $heartbeatInterval), $socket];
     }
 
     /**
@@ -177,8 +214,35 @@ final class AmqpConnectionTest extends TestCase
         $codec = new FrameCodec();
         $connection->receive(AmqpConnection::PROTOCOL_HEADER);
         $connection->receive($codec->encode(Frame::methodFrame(0, 10, 11)));
-        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31)));
+        $connection->receive($codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(60))));
         $connection->receive($codec->encode(Frame::methodFrame(0, 10, 40)));
         self::assertSame(AmqpConnectionState::Open, $connection->state());
+    }
+
+    private function tuneOk(int $heartbeat): string
+    {
+        return pack('nNn', 0, 131072, $heartbeat);
+    }
+
+    /**
+     * @param resource $socket
+     */
+    private function heartbeatFromTune(mixed $socket): int
+    {
+        rewind($socket);
+        $bytes = stream_get_contents($socket);
+        self::assertIsString($bytes);
+
+        foreach ((new FrameCodec())->push($bytes) as $frame) {
+            if ($frame->method() !== [10, 30]) {
+                continue;
+            }
+
+            $values = unpack('nchannelMax/NframeMax/nheartbeat', substr($frame->payload, 4, 8));
+
+            return (int) $values['heartbeat'];
+        }
+
+        self::fail('connection.tune was not written.');
     }
 }

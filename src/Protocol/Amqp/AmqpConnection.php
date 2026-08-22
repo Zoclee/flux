@@ -26,12 +26,21 @@ use Throwable;
 final class AmqpConnection
 {
     public const PROTOCOL_HEADER = "AMQP\x00\x00\x09\x01";
+    private const NANOS_PER_SECOND = 1_000_000_000;
 
     private AmqpConnectionState $state = AmqpConnectionState::AwaitingProtocolHeader;
     private string $headerBuffer = '';
     private FrameCodec $codec;
     private RuntimeConnection $runtimeConnection;
     private ConsumerRegistry $consumers;
+    private int $negotiatedHeartbeat;
+    private int $lastReceivedAt;
+    private int $lastSentAt;
+
+    /**
+     * @var callable(): int
+     */
+    private $clock;
 
     /**
      * @var array<int, true>
@@ -72,11 +81,21 @@ final class AmqpConnection
         private readonly int $maxFrameSize = 131072,
         private readonly ?Broker $broker = null,
         ?ConsumerRegistry $consumers = null,
-        private readonly int $maxMessageSize = 10485760
+        private readonly int $maxMessageSize = 10485760,
+        private readonly int $heartbeatInterval = 60,
+        ?callable $clock = null
     ) {
+        if ($this->heartbeatInterval < 0 || $this->heartbeatInterval > 65535) {
+            throw new RuntimeException('AMQP heartbeat interval must fit in an unsigned short.');
+        }
+
         stream_set_blocking($this->socket, false);
         $this->codec = new FrameCodec($this->maxFrameSize);
         $this->consumers = $consumers ?? new ConsumerRegistry();
+        $this->clock = $clock ?? static fn (): int => hrtime(true);
+        $this->lastReceivedAt = $this->now();
+        $this->lastSentAt = $this->lastReceivedAt;
+        $this->negotiatedHeartbeat = $this->heartbeatInterval;
         $this->runtimeConnection = RuntimeConnection::create(
             'amqp-0-9-1',
             @stream_socket_get_name($this->socket, true) ?: null,
@@ -107,17 +126,32 @@ final class AmqpConnection
 
         if (feof($this->socket)) {
             $this->close();
+            return;
+        }
+
+        if ($this->isHeartbeatTimedOut()) {
+            error_log(sprintf('AMQP connection timed out: %s', $this->runtimeConnection->id));
+            $this->close();
+            return;
         }
 
         $this->deliverToConsumers();
+        if ($this->state === AmqpConnectionState::Closed) {
+            return;
+        }
+
+        $this->sendHeartbeatIfIdle();
     }
 
     public function receive(string $bytes): void
     {
+        $receivedAt = $this->now();
+
         if ($this->state === AmqpConnectionState::AwaitingProtocolHeader) {
             $this->headerBuffer .= $bytes;
 
             if (strlen($this->headerBuffer) < strlen(self::PROTOCOL_HEADER)) {
+                $this->lastReceivedAt = $receivedAt;
                 return;
             }
 
@@ -129,6 +163,7 @@ final class AmqpConnection
             $remaining = substr($this->headerBuffer, strlen(self::PROTOCOL_HEADER));
             $this->headerBuffer = '';
             $this->state = AmqpConnectionState::Starting;
+            $this->lastReceivedAt = $receivedAt;
             $this->writeFrame($this->connectionStart());
 
             if ($remaining === '') {
@@ -140,6 +175,7 @@ final class AmqpConnection
 
         foreach ($this->codec->push($bytes) as $frame) {
             $this->handleFrame($frame);
+            $this->lastReceivedAt = $receivedAt;
         }
     }
 
@@ -160,6 +196,11 @@ final class AmqpConnection
         }
 
         $this->connections->remove($this->runtimeConnection->id);
+        $this->channels = [];
+        $this->pendingPublishMethods = [];
+        $this->pendingPublishes = [];
+        $this->nextDeliveryTags = [];
+        error_log(sprintf('AMQP connection closed: %s', $this->runtimeConnection->id));
         $this->state = AmqpConnectionState::Closed;
     }
 
@@ -173,14 +214,32 @@ final class AmqpConnection
         return $this->state === AmqpConnectionState::Closed;
     }
 
+    public function negotiatedHeartbeatInterval(): int
+    {
+        return $this->negotiatedHeartbeat;
+    }
+
     private function handleFrame(Frame $frame): void
     {
+        if ($frame->type === Frame::TYPE_HEARTBEAT) {
+            if ($frame->channel !== 0 || $frame->payload !== '') {
+                throw new ProtocolException('AMQP heartbeat frames must use channel 0 with an empty payload.');
+            }
+
+            return;
+        }
+
         if ($frame->type === Frame::TYPE_HEADER || $frame->type === Frame::TYPE_BODY) {
             $this->handleContentFrame($frame);
             return;
         }
 
         [$classId, $methodId] = $frame->method();
+
+        if ($this->state === AmqpConnectionState::Open && $frame->channel === 0) {
+            $this->handleOpenConnectionControlFrame($classId, $methodId);
+            return;
+        }
 
         if ($this->state === AmqpConnectionState::Open) {
             $this->handleOpenConnectionFrame($frame, $classId, $methodId);
@@ -198,6 +257,7 @@ final class AmqpConnection
         }
 
         if ($this->state === AmqpConnectionState::Tuning && $classId === 10 && $methodId === 31) {
+            $this->negotiateHeartbeat($frame);
             $this->state = AmqpConnectionState::Opening;
             return;
         }
@@ -211,12 +271,24 @@ final class AmqpConnection
         throw new ProtocolException('Unexpected AMQP method for current connection state.');
     }
 
-    private function handleOpenConnectionFrame(Frame $frame, int $classId, int $methodId): void
+    private function handleOpenConnectionControlFrame(int $classId, int $methodId): void
     {
-        if ($frame->channel === 0) {
-            throw new ProtocolException('AMQP channel methods must not use channel 0.');
+        if ($classId === 10 && $methodId === 50) {
+            $this->writeFrame(Frame::methodFrame(0, 10, 51));
+            $this->close();
+            return;
         }
 
+        if ($classId === 10 && $methodId === 51) {
+            $this->close();
+            return;
+        }
+
+        throw new ProtocolException('Unexpected AMQP connection method for open connection.');
+    }
+
+    private function handleOpenConnectionFrame(Frame $frame, int $classId, int $methodId): void
+    {
         if ($classId === 20 && $methodId === 10) {
             $this->channels[$frame->channel] = true;
             $this->writeFrame(Frame::methodFrame($frame->channel, 20, 11, $this->longString('')));
@@ -771,6 +843,8 @@ final class AmqpConnection
 
     private function releaseOutstandingDeliveries(?int $channel = null): void
     {
+        $released = 0;
+
         foreach ($this->unackedDeliveries as $deliveryChannel => $deliveries) {
             if ($channel !== null && $channel !== $deliveryChannel) {
                 continue;
@@ -779,6 +853,7 @@ final class AmqpConnection
             foreach ($deliveries as $deliveryTag => $mapping) {
                 try {
                     $this->broker()->release(new ReleaseRequest($mapping['delivery']->id));
+                    $released++;
                 } catch (RuntimeException) {
                 }
                 unset($this->unackedDeliveries[$deliveryChannel][$deliveryTag]);
@@ -787,6 +862,10 @@ final class AmqpConnection
             if (($this->unackedDeliveries[$deliveryChannel] ?? []) === []) {
                 unset($this->unackedDeliveries[$deliveryChannel]);
             }
+        }
+
+        if ($released > 0) {
+            error_log(sprintf('AMQP unacked deliveries released: %d', $released));
         }
     }
 
@@ -804,6 +883,55 @@ final class AmqpConnection
             40,
             pack('n', $replyCode) . $this->shortString($this->truncateReplyText($replyText)) . pack('nn', $classId, $methodId)
         ));
+    }
+
+    private function negotiateHeartbeat(Frame $frame): void
+    {
+        if (strlen($frame->payload) < 12) {
+            throw new ProtocolException('AMQP tune-ok payload is incomplete.');
+        }
+
+        $values = unpack('nchannelMax/NframeMax/nheartbeat', substr($frame->payload, 4, 8));
+        $clientHeartbeat = (int) $values['heartbeat'];
+
+        if ($this->heartbeatInterval === 0 || $clientHeartbeat === 0) {
+            $this->negotiatedHeartbeat = 0;
+            return;
+        }
+
+        $this->negotiatedHeartbeat = min($this->heartbeatInterval, $clientHeartbeat);
+    }
+
+    private function isHeartbeatTimedOut(): bool
+    {
+        if ($this->negotiatedHeartbeat === 0 || $this->state !== AmqpConnectionState::Open) {
+            return false;
+        }
+
+        return $this->elapsedSecondsSince($this->lastReceivedAt) >= ($this->negotiatedHeartbeat * 2);
+    }
+
+    private function sendHeartbeatIfIdle(): void
+    {
+        if ($this->negotiatedHeartbeat === 0 || $this->state !== AmqpConnectionState::Open) {
+            return;
+        }
+
+        if ($this->elapsedSecondsSince($this->lastSentAt) < $this->negotiatedHeartbeat) {
+            return;
+        }
+
+        $this->writeFrame(Frame::heartbeatFrame());
+    }
+
+    private function elapsedSecondsSince(int $nanos): float
+    {
+        return ($this->now() - $nanos) / self::NANOS_PER_SECOND;
+    }
+
+    private function now(): int
+    {
+        return ($this->clock)();
     }
 
     private function replyCodeForTopologyException(TopologyException $exception): int
@@ -833,6 +961,8 @@ final class AmqpConnection
 
             $written += $result;
         }
+
+        $this->lastSentAt = $this->now();
     }
 
     private function connectionStart(): Frame
@@ -847,7 +977,7 @@ final class AmqpConnection
 
     private function connectionTune(): Frame
     {
-        return Frame::methodFrame(0, 10, 30, pack('nNn', 0, $this->maxFrameSize, 0));
+        return Frame::methodFrame(0, 10, 30, pack('nNn', 0, $this->maxFrameSize, $this->heartbeatInterval));
     }
 
     private function connectionOpenOk(): Frame

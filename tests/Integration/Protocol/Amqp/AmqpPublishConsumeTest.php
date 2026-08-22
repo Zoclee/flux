@@ -181,6 +181,85 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
     }
 
+    public function testHeartbeatTimeoutReleasesUnackedDeliveryAndCleansConsumerRegistry(): void
+    {
+        $now = 0;
+        $connections = new ConnectionRegistry();
+        $consumers = new ConsumerRegistry();
+        $listener = new AmqpListener(
+            $connections,
+            '127.0.0.1',
+            0,
+            broker: $this->broker(),
+            consumers: $consumers,
+            heartbeatInterval: 1,
+            clock: static function () use (&$now): int {
+                return $now * 1_000_000_000;
+            }
+        );
+        $listener->start();
+        $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $listener->port()), $errorCode, $errorMessage, 1.0);
+        self::assertIsResource($client, sprintf('Could not connect to AMQP listener: %s', $errorMessage));
+        stream_set_blocking($client, false);
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('', 'orders'));
+            fwrite($client, $codec->encode($this->contentHeader(1, 4)));
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, 'held')));
+            $listener->tick();
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->readMethodFrame($listener, $client);
+            $this->readFrame($listener, $client);
+            $this->readFrame($listener, $client);
+            self::assertSame(1, $connections->count());
+            self::assertSame(1, $consumers->count());
+
+            $now = 2;
+            $listener->tick();
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(0, $connections->count());
+        self::assertSame(0, $consumers->count());
+        self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
+    }
+
+    public function testCleanupIsIdempotentAfterDisconnect(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('', 'orders'));
+            fwrite($client, $codec->encode($this->contentHeader(1, 4)));
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, 'held')));
+            $listener->tick();
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->readMethodFrame($listener, $client);
+            $this->readFrame($listener, $client);
+            $this->readFrame($listener, $client);
+            fclose($client);
+            $listener->tick();
+            $listener->stop();
+            $listener->stop();
+        } finally {
+            $listener->stop();
+        }
+
+        self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
+    }
+
     /**
      * @return array{0: AmqpListener, 1: resource}
      */
@@ -204,14 +283,14 @@ final class AmqpPublishConsumeTest extends TestCase
     /**
      * @param resource $client
      */
-    private function connectAndOpenChannel(AmqpListener $listener, mixed $client, int $channel): void
+    private function connectAndOpenChannel(AmqpListener $listener, mixed $client, int $channel, int $heartbeat = 60): void
     {
         $codec = new FrameCodec();
         fwrite($client, AmqpConnection::PROTOCOL_HEADER);
         self::assertSame([10, 10], $this->readMethod($listener, $client));
         $this->sendMethod($client, 0, 10, 11);
         self::assertSame([10, 30], $this->readMethod($listener, $client));
-        $this->sendMethod($client, 0, 10, 31);
+        $this->sendMethod($client, 0, 10, 31, $this->tuneOk($heartbeat));
         $listener->tick();
         $this->sendMethod($client, 0, 10, 40);
         self::assertSame([10, 41], $this->readMethod($listener, $client));
@@ -267,6 +346,11 @@ final class AmqpPublishConsumeTest extends TestCase
     private function shortString(string $value): string
     {
         return chr(strlen($value)) . $value;
+    }
+
+    private function tuneOk(int $heartbeat): string
+    {
+        return pack('nNn', 0, 131072, $heartbeat);
     }
 
     private function packLongLong(int $value): string

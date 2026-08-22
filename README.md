@@ -74,9 +74,11 @@ The AMQP listener defaults to `127.0.0.1:5672` and can be configured with:
 ```text
 FLUX_AMQP_HOST
 FLUX_AMQP_PORT
+FLUX_AMQP_HEARTBEAT
 ```
 
 AMQP authentication is a development placeholder only. The listener advertises `PLAIN` so basic clients can complete the connection handshake, but Flux does not yet implement production authentication, ACLs, or permissions.
+`FLUX_AMQP_HEARTBEAT` defaults to `60` seconds. Set it to `0` to disable heartbeat negotiation and timeout cleanup.
 
 ### Database Migrations
 

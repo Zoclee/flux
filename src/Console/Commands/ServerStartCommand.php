@@ -30,6 +30,7 @@ final class ServerStartCommand
     private $runtimeFactory;
     private string $amqpHost;
     private int $amqpPort;
+    private int $amqpHeartbeat;
 
     /**
      * @param null|callable(Broker, ConnectionRegistry, ConsumerRegistry): BrokerRuntime $runtimeFactory
@@ -39,16 +40,19 @@ final class ServerStartCommand
         private readonly string $version,
         string|callable $amqpHost = '127.0.0.1',
         int $amqpPort = 5672,
+        int $amqpHeartbeat = 60,
         ?callable $runtimeFactory = null
     ) {
         if (is_callable($amqpHost)) {
             $runtimeFactory = $amqpHost;
             $amqpHost = '127.0.0.1';
             $amqpPort = 5672;
+            $amqpHeartbeat = 60;
         }
 
         $this->amqpHost = $amqpHost;
         $this->amqpPort = $amqpPort;
+        $this->amqpHeartbeat = $amqpHeartbeat;
         $this->runtimeFactory = $runtimeFactory;
     }
 
@@ -88,7 +92,12 @@ final class ServerStartCommand
 
         $this->write($output, "Database: connected\n\n");
         $this->write($output, "Protocols:\n");
-        $this->write($output, sprintf("  AMQP 0-9-1  %s:%d\n\n", $this->amqpHost, $this->amqpPort));
+        $this->write($output, sprintf(
+            "  AMQP 0-9-1  %s:%d  heartbeat=%d\n\n",
+            $this->amqpHost,
+            $this->amqpPort,
+            $this->amqpHeartbeat
+        ));
         $this->write($output, "Runtime started.\n");
         $this->write($output, "Press Ctrl+C to stop.\n");
 
@@ -144,7 +153,14 @@ final class ServerStartCommand
             $connections,
             $consumers,
             components: [
-                new AmqpListener($connections, $this->amqpHost, $this->amqpPort, broker: $broker, consumers: $consumers),
+                new AmqpListener(
+                    $connections,
+                    $this->amqpHost,
+                    $this->amqpPort,
+                    broker: $broker,
+                    consumers: $consumers,
+                    heartbeatInterval: $this->amqpHeartbeat
+                ),
             ]
         );
     }

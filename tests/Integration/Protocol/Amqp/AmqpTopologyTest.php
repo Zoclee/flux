@@ -156,7 +156,7 @@ final class AmqpTopologyTest extends TestCase
         self::assertSame([10, 10], $this->readMethod($listener, $client));
         fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 11)));
         self::assertSame([10, 30], $this->readMethod($listener, $client));
-        fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 31)));
+        fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 31, $this->tuneOk(60))));
         $listener->tick();
         fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 40)));
         self::assertSame([10, 41], $this->readMethod($listener, $client));
@@ -191,6 +191,11 @@ final class AmqpTopologyTest extends TestCase
     private function shortString(string $value): string
     {
         return chr(strlen($value)) . $value;
+    }
+
+    private function tuneOk(int $heartbeat): string
+    {
+        return pack('nNn', 0, 131072, $heartbeat);
     }
 
     /**

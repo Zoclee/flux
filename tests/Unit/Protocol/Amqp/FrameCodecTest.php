@@ -24,6 +24,19 @@ final class FrameCodecTest extends TestCase
         self::assertSame('abc', substr($frames[0]->payload, 4));
     }
 
+    public function testItEncodesAndDecodesHeartbeatFrames(): void
+    {
+        $codec = new FrameCodec();
+        $encoded = $codec->encode(Frame::heartbeatFrame());
+        $frames = $codec->push($encoded);
+
+        self::assertSame("\x08\x00\x00\x00\x00\x00\x00\xCE", $encoded);
+        self::assertCount(1, $frames);
+        self::assertSame(Frame::TYPE_HEARTBEAT, $frames[0]->type);
+        self::assertSame(0, $frames[0]->channel);
+        self::assertSame('', $frames[0]->payload);
+    }
+
     public function testItBuffersPartialFrames(): void
     {
         $codec = new FrameCodec();

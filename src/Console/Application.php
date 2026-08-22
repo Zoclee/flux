@@ -181,7 +181,8 @@ HELP);
             $databaseConfig,
             self::VERSION,
             (string) ($amqpConfig['host'] ?? '127.0.0.1'),
-            (int) ($amqpConfig['port'] ?? 5672)
+            (int) ($amqpConfig['port'] ?? 5672),
+            (int) ($amqpConfig['heartbeat'] ?? 60)
         ))->run($output);
     }
 
