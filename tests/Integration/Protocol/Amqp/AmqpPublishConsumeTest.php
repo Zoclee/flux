@@ -8,6 +8,7 @@ use Flux\Broker\Broker;
 use Flux\Broker\Authorizer;
 use Flux\Broker\Authenticator;
 use Flux\Broker\DeliveryState;
+use Flux\Broker\ResourceLimits;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\DeliveryRepository;
@@ -22,13 +23,16 @@ use Flux\Persistence\Postgres\UserRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
 use Flux\Protocol\Amqp\AmqpConnection;
 use Flux\Protocol\Amqp\AmqpListener;
+use Flux\Protocol\Amqp\AmqpTlsConfig;
 use Flux\Protocol\Amqp\Frame;
 use Flux\Protocol\Amqp\FrameCodec;
 use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
+use Flux\Tests\Fixtures\TlsCertificate;
 use PDO;
 use PHPUnit\Framework\Attributes\Before;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class AmqpPublishConsumeTest extends TestCase
 {
@@ -112,6 +116,40 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame($payload, $message->payload);
         self::assertSame('application/octet-stream', $message->contentType);
         self::assertSame(7, $message->priority);
+    }
+
+    public function testTlsDefaultExchangePublishConsumeAndAckUsesSameBrokerFlow(): void
+    {
+        [$listener, $client] = $this->startedTlsListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('', 'orders'));
+            fwrite($client, $codec->encode($this->contentHeader(1, 5)));
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, 'hello')));
+            $listener->tick();
+
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $deliver = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 60], $deliver->method());
+            $deliveryTag = $this->deliveryTagFromDeliver($deliver);
+            $this->readFrame($listener, $client);
+            $body = $this->readFrame($listener, $client);
+            self::assertSame('hello', $body->payload);
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong($deliveryTag) . "\x00");
+            $listener->tick();
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(DeliveryState::Acknowledged, $this->singleDelivery('orders')->state);
     }
 
     public function testInvalidCredentialsNeverReceiveOpenOkAndCleanRuntimeConnection(): void
@@ -208,6 +246,50 @@ final class AmqpPublishConsumeTest extends TestCase
             fclose($client);
             $listener->stop();
         }
+    }
+
+    public function testAuthorizationStillAppliesOverTls(): void
+    {
+        $this->broker()->declareQueue('/', 'orders', true, false);
+        (new UserRepository($this->connection))->setPermissions('guest', '/', '.*', '.*', '^allowed$');
+        [$listener, $client] = $this->startedTlsListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(403, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testTlsDisconnectReleasesUnackedDelivery(): void
+    {
+        [$listener, $client] = $this->startedTlsListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one']);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertSame([60, 60], $this->readMethod($listener, $client));
+            $this->readFrame($listener, $client);
+            $this->readFrame($listener, $client);
+            fclose($client);
+
+            for ($attempt = 0; $attempt < 50; $attempt++) {
+                $listener->tick();
+                usleep(1000);
+            }
+        } finally {
+            $listener->stop();
+        }
+
+        self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
     }
 
     public function testDirectExchangeRejectWithRequeueRedeliversThenRejects(): void
@@ -374,6 +456,141 @@ final class AmqpPublishConsumeTest extends TestCase
             $this->sendMethod($client, 1, 60, 10, $this->basicQos(0, 1, false));
 
             self::assertSame([60, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testConsumerLimitPerChannelClosesRejectedChannelAndRuntimeStaysHealthy(): void
+    {
+        [$listener, $client] = $this->startedListener(limits: new ResourceLimits(maxConsumersPerChannel: 1));
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('invoices'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('invoices', 'consumer-b'));
+            $close = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(506, $this->replyCode($close));
+            self::assertSame(1, $listener->connectionCount());
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testConsumerLimitPerConnectionClosesOnlyRejectedChannel(): void
+    {
+        [$listener, $client] = $this->startedListener(limits: new ResourceLimits(maxConsumersPerConnection: 1));
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('invoices'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 2, 60, 20, $this->basicConsume('invoices', 'consumer-b'));
+            $close = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(506, $this->replyCode($close));
+
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('', 'orders'));
+            fwrite($client, $codec->encode($this->contentHeader(1, 4)));
+            fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, 1, 'ping')));
+            $body = $this->readDeliveryBody($listener, $client);
+            self::assertSame('ping', $body);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testMessageAtConfiguredSizeLimitPublishesAndConsumes(): void
+    {
+        [$listener, $client] = $this->startedListener(limits: new ResourceLimits(maxMessageSize: 5));
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['12345']);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertSame('12345', $this->readDeliveryBody($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testOversizedDeclaredMessageIsRejectedBeforePersistence(): void
+    {
+        [$listener, $client] = $this->startedListener(limits: new ResourceLimits(maxMessageSize: 5));
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 40, $this->basicPublish('', 'orders'));
+            fwrite($client, $codec->encode($this->contentHeader(1, 6)));
+            $this->awaitEof($listener, $client);
+            self::assertSame(0, $this->tableCount('messages'));
+        } finally {
+            if (is_resource($client)) {
+                fclose($client);
+            }
+            $listener->stop();
+        }
+    }
+
+    public function testQueueDepthLimitOnPublishClosesChannelWithResourceError(): void
+    {
+        [$listener, $client] = $this->startedListener(limits: new ResourceLimits(maxQueueDepth: 1));
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 1, '', 'orders', 'first');
+            $this->publishBody($listener, $client, 1, '', 'orders', 'second');
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(506, $this->replyCode($close));
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(1, $listener->connectionCount());
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testZeroQueueDepthLimitAllowsUnlimitedAmqpPublishes(): void
+    {
+        [$listener, $client] = $this->startedListener(limits: new ResourceLimits(maxQueueDepth: 0));
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two', 'three']);
+
+            self::assertSame(3, $this->tableCount('messages'));
+            self::assertSame(3, $this->tableCount('deliveries'));
         } finally {
             fclose($client);
             $listener->stop();
@@ -859,16 +1076,19 @@ final class AmqpPublishConsumeTest extends TestCase
     /**
      * @return array{0: AmqpListener, 1: resource}
      */
-    private function startedListener(?ConnectionRegistry $connections = null): array
+    private function startedListener(?ConnectionRegistry $connections = null, ?ResourceLimits $limits = null): array
     {
         $listener = new AmqpListener(
             $connections ?? new ConnectionRegistry(),
             '127.0.0.1',
             0,
-            broker: $this->broker(),
+            maxFrameSize: $limits?->maxFrameSize ?? 131072,
+            broker: $this->broker($limits),
             authenticator: $this->authenticator(),
             authorizer: $this->authorizer(),
-            consumers: new ConsumerRegistry()
+            consumers: new ConsumerRegistry(),
+            maxMessageSize: $limits?->maxMessageSize ?? 10485760,
+            limits: $limits
         );
         $listener->start();
         $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $listener->port()), $errorCode, $errorMessage, 1.0);
@@ -876,6 +1096,63 @@ final class AmqpPublishConsumeTest extends TestCase
         stream_set_blocking($client, false);
 
         return [$listener, $client];
+    }
+
+    /**
+     * @return array{0: AmqpListener, 1: resource}
+     */
+    private function startedTlsListener(?ConnectionRegistry $connections = null, ?ResourceLimits $limits = null): array
+    {
+        $listener = new AmqpListener(
+            $connections ?? new ConnectionRegistry(),
+            '127.0.0.1',
+            0,
+            maxFrameSize: $limits?->maxFrameSize ?? 131072,
+            broker: $this->broker($limits),
+            authenticator: $this->authenticator(),
+            authorizer: $this->authorizer(),
+            consumers: new ConsumerRegistry(),
+            maxMessageSize: $limits?->maxMessageSize ?? 10485760,
+            tls: $this->tlsConfig(),
+            limits: $limits
+        );
+        $listener->start();
+
+        return [$listener, $this->connectTls($listener)];
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function connectTls(AmqpListener $listener): mixed
+    {
+        $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $listener->port()), $errorCode, $errorMessage, 1.0);
+        self::assertIsResource($client, sprintf('Could not connect to AMQP TLS listener: %s', $errorMessage));
+        stream_set_blocking($client, false);
+        stream_context_set_options($client, [
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+                'allow_self_signed' => true,
+                'crypto_method' => $this->clientCryptoMethod(),
+            ],
+        ]);
+
+        for ($attempt = 0; $attempt < 200; $attempt++) {
+            $listener->tick();
+            $result = @stream_socket_enable_crypto($client, true, $this->clientCryptoMethod());
+            if ($result === true) {
+                return $client;
+            }
+
+            if ($result === false) {
+                self::fail('TLS handshake failed.');
+            }
+
+            usleep(1000);
+        }
+
+        self::fail('Timed out waiting for TLS handshake.');
     }
 
     /**
@@ -1023,6 +1300,23 @@ final class AmqpPublishConsumeTest extends TestCase
         }
 
         self::assertTrue(true);
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function awaitEof(AmqpListener $listener, mixed $client): void
+    {
+        for ($attempt = 0; $attempt < 100; $attempt++) {
+            $listener->tick();
+            fread($client, 8192);
+            if (feof($client)) {
+                return;
+            }
+            usleep(1000);
+        }
+
+        self::fail('Expected AMQP client socket to close.');
     }
 
     private function contentHeader(int $channel, int $bodySize, ?string $contentType = null, int $priority = 0): Frame
@@ -1199,18 +1493,24 @@ final class AmqpPublishConsumeTest extends TestCase
         return $message->payload;
     }
 
-    private function broker(): Broker
+    private function tableCount(string $table): int
+    {
+        return (int) $this->pdo->query(sprintf('SELECT count(*) FROM %s', $table))->fetchColumn();
+    }
+
+    private function broker(?ResourceLimits $limits = null): Broker
     {
         return new Broker(
             new VirtualHostRepository($this->connection),
-            new PublishTransaction($this->connection),
+            new PublishTransaction($this->connection, $limits ?? new ResourceLimits()),
             new DestinationRepository($this->connection),
             new SubscriptionRepository($this->connection),
             new DeliveryRepository($this->connection),
             new BindingRepository($this->connection),
             new RoutingSourceRepository($this->connection),
             new MessageRouteRepository($this->connection),
-            new MessageRepository($this->connection)
+            new MessageRepository($this->connection),
+            $limits
         );
     }
 
@@ -1222,6 +1522,32 @@ final class AmqpPublishConsumeTest extends TestCase
     private function authorizer(): Authorizer
     {
         return new Authorizer(new UserRepository($this->connection));
+    }
+
+    private function tlsConfig(): AmqpTlsConfig
+    {
+        try {
+            $tls = TlsCertificate::create();
+        } catch (RuntimeException $exception) {
+            self::markTestSkipped($exception->getMessage());
+        }
+
+        return new AmqpTlsConfig($tls['cert'], $tls['key']);
+    }
+
+    private function clientCryptoMethod(): int
+    {
+        $method = 0;
+
+        if (defined('STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT')) {
+            $method |= STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT;
+        }
+
+        if (defined('STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT')) {
+            $method |= STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT;
+        }
+
+        return $method !== 0 ? $method : STREAM_CRYPTO_METHOD_TLS_CLIENT;
     }
 
     private function resetSchema(): void

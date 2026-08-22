@@ -117,6 +117,20 @@ SQL);
         return (int) $statement->fetchColumn();
     }
 
+    public function countQueuesByVirtualHost(int $virtualHostId): int
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT COUNT(*)
+FROM destinations
+WHERE virtual_host_id = :virtual_host_id
+  AND type = 'queue'
+SQL);
+        $statement->bindValue('virtual_host_id', $virtualHostId, PDO::PARAM_INT);
+        $statement->execute();
+
+        return (int) $statement->fetchColumn();
+    }
+
     /**
      * @param array{
      *     id: mixed,

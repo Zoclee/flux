@@ -77,6 +77,10 @@ final readonly class QueueShowCommand
         $this->write($output, sprintf("Routes:         %d\n", $routeCount));
         $this->write($output, sprintf("Pending:        %d\n", self::deliveryCount($deliveryCounts, DeliveryState::Pending)));
         $this->write($output, sprintf("Reserved:       %d\n", self::deliveryCount($deliveryCounts, DeliveryState::Reserved)));
+        $this->write($output, sprintf(
+            "Depth:          %d\n",
+            self::deliveryCount($deliveryCounts, DeliveryState::Pending) + self::deliveryCount($deliveryCounts, DeliveryState::Reserved)
+        ));
         $this->write($output, sprintf("Acknowledged:   %d\n", self::deliveryCount($deliveryCounts, DeliveryState::Acknowledged)));
         $this->write($output, sprintf("Rejected:       %d\n", self::deliveryCount($deliveryCounts, DeliveryState::Rejected)));
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Flux\Console;
 
+use Flux\Broker\ResourceLimits;
 use Flux\Console\Commands\DbStatusCommand;
 use Flux\Console\Commands\BindingListCommand;
 use Flux\Console\Commands\BrokerStatsCommand;
@@ -198,6 +199,8 @@ HELP);
             [, $config] = $this->projectContext();
             $databaseConfig = ConnectionConfig::fromArray($config['database']);
             $amqpConfig = $config['amqp'] ?? [];
+            $amqpTlsConfig = $amqpConfig['tls'] ?? [];
+            $limits = ResourceLimits::fromArray($config['limits'] ?? []);
             $diagnosticsConfig = $config['diagnostics'] ?? [];
         } catch (Throwable $exception) {
             $this->write($output, "Flux Message Broker\n\n");
@@ -214,7 +217,15 @@ HELP);
             (int) ($amqpConfig['port'] ?? 5672),
             (int) ($amqpConfig['heartbeat'] ?? 60),
             (string) ($diagnosticsConfig['host'] ?? '127.0.0.1'),
-            (int) ($diagnosticsConfig['port'] ?? 5673)
+            (int) ($diagnosticsConfig['port'] ?? 5673),
+            limits: $limits,
+            amqpEnabled: (bool) ($amqpConfig['enabled'] ?? true),
+            amqpTlsEnabled: (bool) ($amqpTlsConfig['enabled'] ?? false),
+            amqpTlsHost: (string) ($amqpTlsConfig['host'] ?? '0.0.0.0'),
+            amqpTlsPort: (int) ($amqpTlsConfig['port'] ?? 5671),
+            amqpTlsCert: isset($amqpTlsConfig['cert']) ? (string) $amqpTlsConfig['cert'] : null,
+            amqpTlsKey: isset($amqpTlsConfig['key']) ? (string) $amqpTlsConfig['key'] : null,
+            amqpTlsCa: isset($amqpTlsConfig['ca']) && $amqpTlsConfig['ca'] !== '' ? (string) $amqpTlsConfig['ca'] : null
         ))->run($output);
     }
 

@@ -17,6 +17,8 @@ use Flux\Broker\PublishRequest;
 use Flux\Broker\RejectRequest;
 use Flux\Broker\ReleaseRequest;
 use Flux\Broker\ReserveRequest;
+use Flux\Broker\ResourceLimitException;
+use Flux\Broker\ResourceLimits;
 use Flux\Broker\TopologyException;
 use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
@@ -106,6 +108,7 @@ final class AmqpConnection
         ?ConsumerRegistry $consumers = null,
         private readonly int $maxMessageSize = 10485760,
         private readonly int $heartbeatInterval = 60,
+        private readonly ?ResourceLimits $limits = null,
         ?callable $clock = null
     ) {
         if ($this->heartbeatInterval < 0 || $this->heartbeatInterval > 65535) {
@@ -325,6 +328,12 @@ final class AmqpConnection
     private function handleOpenConnectionFrame(Frame $frame, int $classId, int $methodId): void
     {
         if ($classId === 20 && $methodId === 10) {
+            $limits = $this->limits ?? new ResourceLimits();
+            if (!$limits->allows($limits->maxChannelsPerConnection, count($this->channels))) {
+                $this->sendChannelError($frame->channel, 506, 'RESOURCE_ERROR - channel limit reached', 20, 10);
+                return;
+            }
+
             $this->channels[$frame->channel] = true;
             $this->writeFrame(Frame::methodFrame($frame->channel, 20, 11, $this->longString('')));
             return;
@@ -375,6 +384,8 @@ final class AmqpConnection
                 $classId,
                 $methodId
             );
+        } catch (ResourceLimitException $exception) {
+            $this->sendChannelError($frame->channel, 506, $exception->getMessage(), $classId, $methodId);
         } catch (RuntimeException $exception) {
             $this->sendChannelError($frame->channel, 541, $exception->getMessage(), $classId, $methodId);
         }
@@ -649,6 +660,15 @@ final class AmqpConnection
             throw new TopologyException(sprintf('Consumer tag "%s" is already active.', $consumerTag), TopologyException::PRECONDITION_FAILED);
         }
 
+        $limits = $this->limits ?? new ResourceLimits();
+        if (!$limits->allows($limits->maxConsumersPerConnection, count($this->activeConsumers))) {
+            throw new ResourceLimitException('Consumer limit reached for AMQP connection.');
+        }
+
+        if (!$limits->allows($limits->maxConsumersPerChannel, $this->consumerCountForChannel($frame->channel))) {
+            throw new ResourceLimitException('Consumer limit reached for AMQP channel.');
+        }
+
         if (!$this->authorizeResource($frame->channel, AuthorizationPermission::Read, $queue, 60, 20)) {
             return;
         }
@@ -797,7 +817,7 @@ final class AmqpConnection
             throw new ProtocolException('AMQP content header class is not supported.');
         }
 
-        if ($bodySize > $this->maxMessageSize) {
+        if ($this->maxMessageSize !== 0 && $bodySize > $this->maxMessageSize) {
             throw new ProtocolException('AMQP message body exceeds configured message size limit.');
         }
 
@@ -825,7 +845,7 @@ final class AmqpConnection
 
         $publish = &$this->pendingPublishes[$frame->channel];
         $newSize = strlen($publish['body']) + strlen($frame->payload);
-        if ($newSize > $publish['body_size'] || $newSize > $this->maxMessageSize) {
+        if ($newSize > $publish['body_size'] || ($this->maxMessageSize !== 0 && $newSize > $this->maxMessageSize)) {
             throw new ProtocolException('AMQP content body byte count exceeds declared size.');
         }
 
@@ -863,15 +883,18 @@ final class AmqpConnection
                     $properties['content_type'] ?? null,
                     $properties['content_encoding'] ?? null,
                     $properties['priority'] ?? 0,
-                ($properties['delivery_mode'] ?? 2) === 2,
-                $messageId
-            );
-            $this->sendPublishConfirm($channel);
-        } catch (TopologyException $exception) {
-            $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
-        } catch (Throwable $exception) {
-            $this->sendChannelError($channel, 541, $exception->getMessage(), 60, 40);
+                    ($properties['delivery_mode'] ?? 2) === 2,
+                    $messageId
+                );
+                $this->sendPublishConfirm($channel);
+            } catch (TopologyException $exception) {
+                $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
+            } catch (ResourceLimitException $exception) {
+                $this->sendChannelError($channel, 506, $exception->getMessage(), 60, 40);
+            } catch (Throwable $exception) {
+                $this->sendChannelError($channel, 541, $exception->getMessage(), 60, 40);
             }
+
             return;
         }
 
@@ -891,6 +914,8 @@ final class AmqpConnection
             $this->sendPublishConfirm($channel);
         } catch (TopologyException $exception) {
             $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
+        } catch (ResourceLimitException $exception) {
+            $this->sendChannelError($channel, 506, $exception->getMessage(), 60, 40);
         } catch (Throwable $exception) {
             $this->sendChannelError($channel, 541, $exception->getMessage(), 60, 40);
         }
@@ -1016,7 +1041,7 @@ final class AmqpConnection
         ));
         $this->writeFrame(new Frame(Frame::TYPE_HEADER, $channel, $this->contentHeader($message)));
 
-        foreach (str_split($message->payload, max(1, $this->maxFrameSize)) as $chunk) {
+        foreach (str_split($message->payload, $this->outboundBodyChunkSize()) as $chunk) {
             $this->writeFrame(new Frame(Frame::TYPE_BODY, $channel, $chunk));
         }
     }
@@ -1139,6 +1164,23 @@ final class AmqpConnection
         }
 
         return $count;
+    }
+
+    private function consumerCountForChannel(int $channel): int
+    {
+        $count = 0;
+        foreach ($this->activeConsumers as $state) {
+            if ($state['channel'] === $channel) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
+    private function outboundBodyChunkSize(): int
+    {
+        return $this->maxFrameSize === 0 ? 131072 : max(1, $this->maxFrameSize);
     }
 
     private function clearEmptyUnackedChannel(int $channel): void

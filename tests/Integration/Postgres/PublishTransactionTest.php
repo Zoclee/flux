@@ -6,6 +6,8 @@ namespace Flux\Tests\Integration\Postgres;
 
 use Flux\Broker\DeliveryState;
 use Flux\Broker\Destination;
+use Flux\Broker\ResourceLimitException;
+use Flux\Broker\ResourceLimits;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\DeliveryRepository;
@@ -167,6 +169,67 @@ final class PublishTransactionTest extends TestCase
         self::assertSame(1, $this->tableCount('messages'));
         self::assertSame(1, $this->tableCount('message_routes'));
         self::assertSame(0, $this->tableCount('deliveries'));
+    }
+
+    public function testQueueDepthLimitAllowsExactlyAtLimitAndRejectsNextPublish(): void
+    {
+        $destination = $this->bindDestination('orders', 'order.created');
+        $this->subscriptions->create($destination->id, 'worker-a');
+        $publisher = new PublishTransaction($this->connection, new ResourceLimits(maxQueueDepth: 1));
+
+        $result = $publisher->publish($this->defaultVirtualHostId, 'orders', 'order.created', 'first');
+        self::assertSame(1, $result->deliveryCount());
+        $before = $this->graphCounts();
+
+        try {
+            $publisher->publish($this->defaultVirtualHostId, 'orders', 'order.created', 'second');
+            self::fail('Queue depth limit should reject a publish beyond capacity.');
+        } catch (ResourceLimitException $exception) {
+            self::assertStringContainsString('Queue depth limit reached', $exception->getMessage());
+            self::assertSame($before, $this->graphCounts());
+        }
+    }
+
+    public function testAcknowledgedDeliveryFreesQueueDepthCapacity(): void
+    {
+        $destination = $this->bindDestination('orders', 'order.created');
+        $subscription = $this->subscriptions->create($destination->id, 'worker-a');
+        $publisher = new PublishTransaction($this->connection, new ResourceLimits(maxQueueDepth: 1));
+        $result = $publisher->publish($this->defaultVirtualHostId, 'orders', 'order.created', 'first');
+        $deliveries = new DeliveryRepository($this->connection);
+        $reserved = $deliveries->reserveNext($subscription->id, 'consumer-a', '1');
+        self::assertNotNull($reserved);
+
+        try {
+            $publisher->publish($this->defaultVirtualHostId, 'orders', 'order.created', 'blocked');
+            self::fail('Reserved deliveries should count toward queue depth.');
+        } catch (ResourceLimitException) {
+        }
+
+        $deliveries->acknowledge($result->deliveries[0]->id);
+        $next = $publisher->publish($this->defaultVirtualHostId, 'orders', 'order.created', 'second');
+
+        self::assertSame(1, $next->deliveryCount());
+        self::assertSame(2, $this->tableCount('messages'));
+        self::assertSame(2, $this->tableCount('deliveries'));
+    }
+
+    public function testQueueDepthLimitKeepsFanOutPublishAtomic(): void
+    {
+        $destinationA = $this->bindDestination('orders', 'order.created', 'orders-a');
+        $destinationB = $this->bindDestination('orders', 'order.created', 'orders-b');
+        $this->subscriptions->create($destinationA->id, 'worker-a');
+        $this->subscriptions->create($destinationB->id, 'worker-b');
+        $this->publisher->publishToDestination($destinationB->id, 'already-full');
+        $before = $this->graphCounts();
+        $publisher = new PublishTransaction($this->connection, new ResourceLimits(maxQueueDepth: 1));
+
+        try {
+            $publisher->publish($this->defaultVirtualHostId, 'orders', 'order.created', 'payload');
+            self::fail('A full fan-out destination should reject the whole publish.');
+        } catch (ResourceLimitException) {
+            self::assertSame($before, $this->graphCounts());
+        }
     }
 
     public function testMultipleBindingsResolveToMultipleDestinations(): void

@@ -96,4 +96,14 @@ final class FrameCodecTest extends TestCase
 
         $codec->encode(new Frame(Frame::TYPE_METHOD, 0, '12345'));
     }
+
+    public function testZeroFrameLimitAllowsLargeFrames(): void
+    {
+        $codec = new FrameCodec(maxFrameSize: 0);
+        $encoded = $codec->encode(new Frame(Frame::TYPE_BODY, 1, str_repeat('x', 1024)));
+        $frames = $codec->push($encoded);
+
+        self::assertCount(1, $frames);
+        self::assertSame(str_repeat('x', 1024), $frames[0]->payload);
+    }
 }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Flux\Runtime;
 
+use Flux\Broker\ResourceLimits;
 use JsonException;
 use RuntimeException;
 
@@ -31,7 +32,8 @@ final class RuntimeDiagnosticsServer implements RuntimeComponent
         private readonly ConnectionRegistry $connections,
         private readonly ConsumerRegistry $consumers,
         private string $host = '127.0.0.1',
-        private int $port = 5673
+        private int $port = 5673,
+        private readonly ?ResourceLimits $limits = null
     ) {
         if ($this->host === '') {
             throw new RuntimeException('Runtime diagnostics host must not be empty.');
@@ -144,6 +146,7 @@ final class RuntimeDiagnosticsServer implements RuntimeComponent
             'stats' => ['ok' => true, 'data' => [
                 'connections' => $this->connections->count(),
                 'consumers' => $this->consumers->count(),
+                'limits' => $this->limitsData(),
             ]],
             'connections' => ['ok' => true, 'data' => array_map(
                 static fn (RuntimeConnection $connection): array => [
@@ -167,6 +170,25 @@ final class RuntimeDiagnosticsServer implements RuntimeComponent
             )],
             default => ['ok' => false, 'error' => 'unknown command'],
         };
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function limitsData(): array
+    {
+        $limits = $this->limits ?? new ResourceLimits();
+
+        return [
+            'max_connections' => $limits->maxConnections,
+            'max_channels_per_connection' => $limits->maxChannelsPerConnection,
+            'max_consumers_per_connection' => $limits->maxConsumersPerConnection,
+            'max_consumers_per_channel' => $limits->maxConsumersPerChannel,
+            'amqp_max_frame_size' => $limits->maxFrameSize,
+            'max_message_size' => $limits->maxMessageSize,
+            'max_queues_per_virtual_host' => $limits->maxQueuesPerVirtualHost,
+            'max_queue_depth' => $limits->maxQueueDepth,
+        ];
     }
 
     /**

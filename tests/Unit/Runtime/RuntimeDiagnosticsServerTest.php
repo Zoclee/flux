@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Flux\Tests\Unit\Runtime;
 
 use DateTimeImmutable;
+use Flux\Broker\ResourceLimits;
 use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
 use Flux\Runtime\RuntimeConnection;
@@ -85,7 +86,12 @@ final class RuntimeDiagnosticsServerTest extends TestCase
             'test',
             new DateTimeImmutable()
         ));
-        $server = new RuntimeDiagnosticsServer($connections, $consumers, port: 0);
+        $server = new RuntimeDiagnosticsServer(
+            $connections,
+            $consumers,
+            port: 0,
+            limits: new ResourceLimits(maxConnections: 7, maxQueueDepth: 11)
+        );
         $server->start();
 
         try {
@@ -100,6 +106,8 @@ final class RuntimeDiagnosticsServerTest extends TestCase
             self::assertTrue($stats['ok']);
             self::assertSame(1, $stats['data']['connections']);
             self::assertSame(0, $stats['data']['consumers']);
+            self::assertSame(7, $stats['data']['limits']['max_connections']);
+            self::assertSame(11, $stats['data']['limits']['max_queue_depth']);
         } finally {
             $server->stop();
         }

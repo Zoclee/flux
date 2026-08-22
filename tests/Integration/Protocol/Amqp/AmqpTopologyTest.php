@@ -8,6 +8,8 @@ use Flux\Broker\Broker;
 use Flux\Broker\Authorizer;
 use Flux\Broker\Authenticator;
 use Flux\Broker\DestinationType;
+use Flux\Broker\ResourceLimitException;
+use Flux\Broker\ResourceLimits;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\DeliveryRepository;
@@ -198,16 +200,51 @@ final class AmqpTopologyTest extends TestCase
         }
     }
 
+    public function testQueueCountLimitRejectsNewQueuesButAllowsCompatibleRedeclare(): void
+    {
+        $broker = $this->broker(new ResourceLimits(maxQueuesPerVirtualHost: 1));
+
+        $first = $broker->declareQueue('/', 'orders', true, false);
+        $again = $broker->declareQueue('/', 'orders', true, false);
+
+        self::assertSame($first->id, $again->id);
+        self::assertSame(1, (new DestinationRepository($this->connection))->countQueuesByVirtualHost($this->virtualHostId));
+
+        $this->expectException(ResourceLimitException::class);
+        $this->expectExceptionMessage('Queue limit reached');
+
+        $broker->declareQueue('/', 'invoices', true, false);
+    }
+
+    public function testQueueCountLimitDeniedOverAmqpClosesChannelWithResourceError(): void
+    {
+        [$listener, $client] = $this->startedListener(new ResourceLimits(maxQueuesPerVirtualHost: 1));
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 10, $this->queueDeclare('orders', true))));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 10, $this->queueDeclare('invoices', true))));
+            $close = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(506, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     /**
      * @return array{0: AmqpListener, 1: resource}
      */
-    private function startedListener(): array
+    private function startedListener(?ResourceLimits $limits = null): array
     {
         $listener = new AmqpListener(
             new ConnectionRegistry(),
             '127.0.0.1',
             0,
-            broker: $this->broker(),
+            broker: $this->broker($limits),
             authenticator: $this->authenticator(),
             authorizer: $this->authorizer()
         );
@@ -339,16 +376,17 @@ final class AmqpTopologyTest extends TestCase
         return (int) $value['replyCode'];
     }
 
-    private function broker(): Broker
+    private function broker(?ResourceLimits $limits = null): Broker
     {
         return new Broker(
             new VirtualHostRepository($this->connection),
-            new PublishTransaction($this->connection),
+            new PublishTransaction($this->connection, $limits ?? new ResourceLimits()),
             new DestinationRepository($this->connection),
             new SubscriptionRepository($this->connection),
             new DeliveryRepository($this->connection),
             new BindingRepository($this->connection),
-            new RoutingSourceRepository($this->connection)
+            new RoutingSourceRepository($this->connection),
+            limits: $limits
         );
     }
 

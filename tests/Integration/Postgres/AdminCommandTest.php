@@ -134,6 +134,7 @@ final class AdminCommandTest extends TestCase
         self::assertStringContainsString('Routes:         1', $output);
         self::assertStringContainsString('Pending:        0', $output);
         self::assertStringContainsString('Reserved:       1', $output);
+        self::assertStringContainsString('Depth:          1', $output);
         self::assertStringContainsString('Acknowledged:   0', $output);
         self::assertStringContainsString('Rejected:       0', $output);
 
@@ -260,7 +261,7 @@ SQL)->execute(['message_route_id' => $earlyRoute->id]);
         [$exitCode, $output] = $this->runSimpleCommand(new BrokerStatsCommand($this->context, new AvailableRuntimeDiagnostics()));
 
         self::assertSame(0, $exitCode);
-        self::assertStringContainsString('Connections: 3', $output);
+        self::assertStringContainsString('Connections: 3 / 10', $output);
         self::assertStringContainsString('Consumers:   5', $output);
     }
 
@@ -403,7 +404,7 @@ final readonly class AvailableRuntimeDiagnostics implements RuntimeDiagnostics
 {
     public function stats(): array
     {
-        return ['connections' => 3, 'consumers' => 5];
+        return ['connections' => 3, 'consumers' => 5, 'limits' => ['max_connections' => 10]];
     }
 
     public function connections(): array

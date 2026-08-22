@@ -52,7 +52,12 @@ final readonly class BrokerStatsCommand
         $this->write($output, "Broker Statistics\n\n");
         $this->write($output, "Runtime:\n");
         if ($runtimeAvailable) {
-            $this->write($output, sprintf("  Connections: %d\n", (int) ($runtime['connections'] ?? 0)));
+            $limits = is_array($runtime['limits'] ?? null) ? $runtime['limits'] : [];
+            $this->write($output, sprintf(
+                "  Connections: %d / %s\n",
+                (int) ($runtime['connections'] ?? 0),
+                self::limit((int) ($limits['max_connections'] ?? 0))
+            ));
             $this->write($output, sprintf("  Consumers:   %d\n\n", (int) ($runtime['consumers'] ?? 0)));
         } else {
             $this->write($output, "  Runtime: unavailable\n\n");
@@ -78,6 +83,11 @@ final readonly class BrokerStatsCommand
     private static function deliveryCount(array $counts, DeliveryState $state): int
     {
         return $counts[$state->value] ?? 0;
+    }
+
+    private static function limit(int $limit): string
+    {
+        return $limit === 0 ? 'unlimited' : (string) $limit;
     }
 
     /**

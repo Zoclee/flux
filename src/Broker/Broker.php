@@ -26,7 +26,8 @@ final readonly class Broker
         private ?BindingRepository $bindings = null,
         private ?RoutingSourceRepository $routingSources = null,
         private ?MessageRouteRepository $messageRoutes = null,
-        private ?MessageRepository $messages = null
+        private ?MessageRepository $messages = null,
+        private ?ResourceLimits $limits = null
     ) {
     }
 
@@ -214,6 +215,11 @@ final readonly class Broker
         if ($destination === null) {
             if ($passive) {
                 throw new TopologyException(sprintf('Queue "%s" does not exist.', $name), TopologyException::NOT_FOUND);
+            }
+
+            $limits = $this->limits ?? new ResourceLimits();
+            if (!$limits->allows($limits->maxQueuesPerVirtualHost, $this->destinations->countQueuesByVirtualHost($virtualHost->id))) {
+                throw new ResourceLimitException(sprintf('Queue limit reached for virtual host "%s".', $virtualHostName));
             }
 
             $destination = $this->destinations->create(

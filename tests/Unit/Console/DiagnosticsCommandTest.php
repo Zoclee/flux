@@ -85,6 +85,7 @@ final readonly class FakeRuntimeDiagnostics implements RuntimeDiagnostics
     public function __construct(
         private array $connections = [],
         private array $consumers = [],
+        private array $limits = [],
         private bool $unavailable = false
     ) {
     }
@@ -95,7 +96,11 @@ final readonly class FakeRuntimeDiagnostics implements RuntimeDiagnostics
             throw new RuntimeException('unavailable');
         }
 
-        return ['connections' => count($this->connections), 'consumers' => count($this->consumers)];
+        return [
+            'connections' => count($this->connections),
+            'consumers' => count($this->consumers),
+            'limits' => $this->limits,
+        ];
     }
 
     public function connections(): array

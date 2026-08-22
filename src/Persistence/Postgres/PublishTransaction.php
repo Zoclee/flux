@@ -6,6 +6,9 @@ namespace Flux\Persistence\Postgres;
 
 use Flux\Broker\Binding;
 use Flux\Broker\PublishResult;
+use Flux\Broker\ResourceLimitException;
+use Flux\Broker\ResourceLimits;
+use PDO;
 
 final readonly class PublishTransaction
 {
@@ -15,7 +18,10 @@ final readonly class PublishTransaction
     private SubscriptionRepository $subscriptions;
     private DeliveryRepository $deliveries;
 
-    public function __construct(private Connection $connection)
+    public function __construct(
+        private Connection $connection,
+        private ResourceLimits $limits = new ResourceLimits()
+    )
     {
         $this->messages = new MessageRepository($connection);
         $this->bindings = new BindingRepository($connection);
@@ -51,6 +57,9 @@ final readonly class PublishTransaction
             $persistent,
             $messageId
         ): PublishResult {
+            $destinationIds = $this->uniqueDestinationIds($this->bindings->findForRoute($virtualHostId, $source, $routingKey));
+            $this->assertQueueDepthCapacity($destinationIds);
+
             $message = $this->messages->create(
                 $payload,
                 $headers,
@@ -64,7 +73,7 @@ final readonly class PublishTransaction
             $routes = [];
             $deliveries = [];
 
-            foreach ($this->uniqueDestinationIds($this->bindings->findForRoute($virtualHostId, $source, $routingKey)) as $destinationId) {
+            foreach ($destinationIds as $destinationId) {
                 $route = $this->routes->create($message->id, $destinationId);
                 $routes[] = $route;
 
@@ -100,6 +109,8 @@ final readonly class PublishTransaction
             $persistent,
             $messageId
         ): PublishResult {
+            $this->assertQueueDepthCapacity([$destinationId]);
+
             $message = $this->messages->create(
                 $payload,
                 $headers,
@@ -140,5 +151,56 @@ final readonly class PublishTransaction
         }
 
         return $destinationIds;
+    }
+
+    /**
+     * @param list<int> $destinationIds
+     */
+    private function assertQueueDepthCapacity(array $destinationIds): void
+    {
+        if ($this->limits->maxQueueDepth === 0 || $destinationIds === []) {
+            return;
+        }
+
+        $pdo = $this->connection->pdo();
+        foreach ($destinationIds as $destinationId) {
+            $this->lockDestination($pdo, $destinationId);
+            $currentDepth = $this->outstandingDepth($pdo, $destinationId);
+            $newDeliveries = $this->subscriptionCount($pdo, $destinationId);
+
+            if (!$this->limits->allows($this->limits->maxQueueDepth, $currentDepth, $newDeliveries)) {
+                throw new ResourceLimitException(sprintf('Queue depth limit reached for destination %d.', $destinationId));
+            }
+        }
+    }
+
+    private function lockDestination(PDO $pdo, int $destinationId): void
+    {
+        $statement = $pdo->prepare('SELECT id FROM destinations WHERE id = :id FOR UPDATE');
+        $statement->bindValue('id', $destinationId, PDO::PARAM_INT);
+        $statement->execute();
+    }
+
+    private function outstandingDepth(PDO $pdo, int $destinationId): int
+    {
+        $statement = $pdo->prepare(<<<'SQL'
+SELECT COUNT(*)
+FROM deliveries
+WHERE destination_id = :destination_id
+  AND state IN ('pending', 'reserved')
+SQL);
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->execute();
+
+        return (int) $statement->fetchColumn();
+    }
+
+    private function subscriptionCount(PDO $pdo, int $destinationId): int
+    {
+        $statement = $pdo->prepare('SELECT COUNT(*) FROM subscriptions WHERE destination_id = :destination_id');
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->execute();
+
+        return (int) $statement->fetchColumn();
     }
 }

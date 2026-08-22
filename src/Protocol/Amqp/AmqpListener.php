@@ -4,9 +4,10 @@ declare(strict_types=1);
 
 namespace Flux\Protocol\Amqp;
 
-use Flux\Broker\Broker;
 use Flux\Broker\AuthenticationService;
 use Flux\Broker\AuthorizationService;
+use Flux\Broker\Broker;
+use Flux\Broker\ResourceLimits;
 use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
 use Flux\Runtime\RuntimeComponent;
@@ -24,6 +25,11 @@ final class AmqpListener implements RuntimeComponent
      */
     private array $connections = [];
 
+    /**
+     * @var array<string, resource>
+     */
+    private array $pendingTlsClients = [];
+
     public function __construct(
         private readonly ConnectionRegistry $runtimeConnections,
         private string $host = '127.0.0.1',
@@ -33,8 +39,11 @@ final class AmqpListener implements RuntimeComponent
         private readonly ?AuthenticationService $authenticator = null,
         private readonly ?AuthorizationService $authorizer = null,
         private readonly ?ConsumerRegistry $consumers = null,
+        private readonly int $maxMessageSize = 10485760,
         private readonly int $heartbeatInterval = 60,
-        private readonly mixed $clock = null
+        private readonly mixed $clock = null,
+        private readonly ?AmqpTlsConfig $tls = null,
+        private readonly ?ResourceLimits $limits = null
     ) {
         if ($this->host === '') {
             throw new RuntimeException('AMQP listener host must not be empty.');
@@ -83,19 +92,23 @@ final class AmqpListener implements RuntimeComponent
         }
 
         while (($client = @stream_socket_accept($this->server, 0)) !== false) {
-            $key = (string) (int) $client;
-            $this->connections[$key] = new AmqpConnection(
-                $client,
-                $this->runtimeConnections,
-                $this->maxFrameSize,
-                $this->broker,
-                $this->authenticator,
-                $this->authorizer,
-                $this->consumers,
-                heartbeatInterval: $this->heartbeatInterval,
-                clock: $this->clock
-            );
+            stream_set_blocking($client, false);
+
+            if (!$this->hasConnectionCapacity()) {
+                fclose($client);
+                continue;
+            }
+
+            if ($this->tls !== null) {
+                stream_context_set_options($client, ['ssl' => $this->tls->streamContextOptions()]);
+                $this->pendingTlsClients[(string) (int) $client] = $client;
+                continue;
+            }
+
+            $this->addConnection($client);
         }
+
+        $this->completePendingTlsHandshakes();
 
         foreach ($this->connections as $key => $connection) {
             $connection->tick();
@@ -112,6 +125,14 @@ final class AmqpListener implements RuntimeComponent
         }
 
         $this->connections = [];
+
+        foreach ($this->pendingTlsClients as $client) {
+            if (is_resource($client)) {
+                fclose($client);
+            }
+        }
+
+        $this->pendingTlsClients = [];
 
         if (is_resource($this->server)) {
             fclose($this->server);
@@ -133,5 +154,63 @@ final class AmqpListener implements RuntimeComponent
     public function connectionCount(): int
     {
         return count($this->connections);
+    }
+
+    public function isTls(): bool
+    {
+        return $this->tls !== null;
+    }
+
+    private function completePendingTlsHandshakes(): void
+    {
+        foreach ($this->pendingTlsClients as $key => $client) {
+            if (!is_resource($client) || feof($client)) {
+                unset($this->pendingTlsClients[$key]);
+                if (is_resource($client)) {
+                    fclose($client);
+                }
+                continue;
+            }
+
+            $result = @stream_socket_enable_crypto($client, true, AmqpTlsConfig::serverCryptoMethod());
+            if ($result === true) {
+                unset($this->pendingTlsClients[$key]);
+                $this->addConnection($client);
+                continue;
+            }
+
+            if ($result === false) {
+                unset($this->pendingTlsClients[$key]);
+                fclose($client);
+            }
+        }
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function addConnection(mixed $client): void
+    {
+        $key = (string) (int) $client;
+        $this->connections[$key] = new AmqpConnection(
+            $client,
+            $this->runtimeConnections,
+            $this->maxFrameSize,
+            $this->broker,
+            $this->authenticator,
+            $this->authorizer,
+            $this->consumers,
+            $this->maxMessageSize,
+            heartbeatInterval: $this->heartbeatInterval,
+            limits: $this->limits,
+            clock: $this->clock
+        );
+    }
+
+    private function hasConnectionCapacity(): bool
+    {
+        $limit = ($this->limits ?? new ResourceLimits())->maxConnections;
+
+        return $limit === 0 || $this->runtimeConnections->count() + count($this->pendingTlsClients) < $limit;
     }
 }

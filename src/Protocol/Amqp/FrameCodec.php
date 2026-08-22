@@ -18,7 +18,7 @@ final class FrameCodec
     public function encode(Frame $frame): string
     {
         $size = strlen($frame->payload);
-        if ($size > $this->maxFrameSize) {
+        if ($this->maxFrameSize !== 0 && $size > $this->maxFrameSize) {
             throw new ProtocolException('AMQP frame exceeds configured frame size limit.');
         }
 
@@ -41,7 +41,7 @@ final class FrameCodec
             $header = unpack('Ctype/nchannel/Nsize', substr($this->buffer, 0, 7));
             $size = (int) $header['size'];
 
-            if ($size > $this->maxFrameSize) {
+            if ($this->maxFrameSize !== 0 && $size > $this->maxFrameSize) {
                 throw new ProtocolException('AMQP frame exceeds configured frame size limit.');
             }
 

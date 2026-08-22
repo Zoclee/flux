@@ -18,6 +18,7 @@ use Flux\Runtime\BrokerRuntime;
 use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
 use Flux\Runtime\RuntimeState;
+use Flux\Tests\Fixtures\TlsCertificate;
 use PDO;
 use PHPUnit\Framework\Attributes\Before;
 use PHPUnit\Framework\TestCase;
@@ -119,10 +120,97 @@ final class BrokerRuntimeIntegrationTest extends TestCase
         self::assertStringContainsString('Flux Message Broker', $output);
         self::assertStringContainsString('Status:   starting', $output);
         self::assertStringContainsString('Database: connected', $output);
-        self::assertStringContainsString("Protocols:\n  AMQP 0-9-1  127.0.0.1:5672", $output);
+        self::assertStringContainsString('AMQP 0-9-1      127.0.0.1:5672', $output);
+        self::assertStringNotContainsString('AMQP 0-9-1 TLS', $output);
         self::assertStringContainsString('Runtime started.', $output);
         self::assertStringContainsString('Runtime stopped.', $output);
         self::assertSame($before, $this->brokerTableCounts());
+    }
+
+    public function testServerStartCommandReportsTlsListenerWhenEnabled(): void
+    {
+        try {
+            $tls = TlsCertificate::create();
+        } catch (\RuntimeException $exception) {
+            self::markTestSkipped($exception->getMessage());
+        }
+
+        $stream = fopen('php://memory', 'w+');
+        self::assertIsResource($stream);
+
+        $command = new ServerStartCommand(
+            $this->config,
+            '0.1.0-dev',
+            '127.0.0.1',
+            5672,
+            60,
+            '127.0.0.1',
+            5673,
+            function (Broker $broker, ConnectionRegistry $connections, ConsumerRegistry $consumers): BrokerRuntime {
+                $runtime = null;
+                $runtime = new BrokerRuntime(
+                    $broker,
+                    $connections,
+                    $consumers,
+                    0,
+                    static function () use (&$runtime): void {
+                        $runtime?->requestShutdown();
+                    }
+                );
+
+                return $runtime;
+            },
+            true,
+            true,
+            '127.0.0.1',
+            5671,
+            $tls['cert'],
+            $tls['key']
+        );
+
+        $exitCode = $command->run($stream);
+        rewind($stream);
+        $output = stream_get_contents($stream);
+        fclose($stream);
+
+        self::assertIsString($output);
+        self::assertSame(0, $exitCode);
+        self::assertStringContainsString('AMQP 0-9-1      127.0.0.1:5672', $output);
+        self::assertStringContainsString('AMQP 0-9-1 TLS  127.0.0.1:5671', $output);
+    }
+
+    public function testServerStartCommandFailsForInvalidTlsCertificate(): void
+    {
+        $stream = fopen('php://memory', 'w+');
+        self::assertIsResource($stream);
+
+        $command = new ServerStartCommand(
+            $this->config,
+            '0.1.0-dev',
+            '127.0.0.1',
+            5672,
+            60,
+            '127.0.0.1',
+            5673,
+            null,
+            true,
+            true,
+            '127.0.0.1',
+            5671,
+            __DIR__ . '/missing.crt',
+            __FILE__
+        );
+
+        $exitCode = $command->run($stream);
+        rewind($stream);
+        $output = stream_get_contents($stream);
+        fclose($stream);
+
+        self::assertIsString($output);
+        self::assertSame(1, $exitCode);
+        self::assertStringContainsString('Startup:  failed', $output);
+        self::assertStringContainsString('AMQP TLS certificate file', $output);
+        self::assertStringNotContainsString('Runtime started.', $output);
     }
 
     /**

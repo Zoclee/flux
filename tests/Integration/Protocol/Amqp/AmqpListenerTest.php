@@ -7,12 +7,16 @@ namespace Flux\Tests\Integration\Protocol\Amqp;
 use Flux\Broker\AuthenticatedUser;
 use Flux\Broker\AuthenticationResult;
 use Flux\Broker\AuthenticationService;
+use Flux\Broker\ResourceLimits;
 use Flux\Protocol\Amqp\AmqpConnection;
 use Flux\Protocol\Amqp\AmqpListener;
+use Flux\Protocol\Amqp\AmqpTlsConfig;
 use Flux\Protocol\Amqp\Frame;
 use Flux\Protocol\Amqp\FrameCodec;
 use Flux\Runtime\ConnectionRegistry;
+use Flux\Tests\Fixtures\TlsCertificate;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 final class AmqpListenerTest extends TestCase
 {
@@ -56,6 +60,179 @@ final class AmqpListenerTest extends TestCase
         } finally {
             $listener->stop();
         }
+    }
+
+    public function testTlsListenerStartsAndCompletesConnectionHandshakeOverTcp(): void
+    {
+        $tls = $this->tlsConfig();
+        $runtimeConnections = new ConnectionRegistry();
+        $listener = new AmqpListener($runtimeConnections, '127.0.0.1', 0, authenticator: $this->authenticator(), tls: $tls);
+        $listener->start();
+
+        try {
+            $client = $this->connectTls($listener);
+            $this->connectAmqp($listener, $client, 60);
+            self::assertSame(1, $runtimeConnections->count());
+            fclose($client);
+        } finally {
+            $listener->stop();
+        }
+
+        self::assertSame(0, $runtimeConnections->count());
+    }
+
+    public function testConnectionLimitRejectsAdditionalPlaintextClientsAndRecoversCapacity(): void
+    {
+        $runtimeConnections = new ConnectionRegistry();
+        $listener = new AmqpListener(
+            $runtimeConnections,
+            '127.0.0.1',
+            0,
+            authenticator: $this->authenticator(),
+            limits: new ResourceLimits(maxConnections: 1)
+        );
+        $listener->start();
+
+        try {
+            $first = $this->connect($listener);
+            $this->connectAmqp($listener, $first, 60);
+            self::assertSame(1, $runtimeConnections->count());
+
+            $second = $this->connect($listener);
+            $this->awaitEof($listener, $second);
+            fclose($second);
+            self::assertSame(1, $runtimeConnections->count());
+
+            fclose($first);
+            $listener->tick();
+            self::assertSame(0, $runtimeConnections->count());
+
+            $third = $this->connect($listener);
+            $this->connectAmqp($listener, $third, 60);
+            self::assertSame(1, $runtimeConnections->count());
+            fclose($third);
+        } finally {
+            $listener->stop();
+        }
+    }
+
+    public function testConnectionLimitRejectsAdditionalTlsClients(): void
+    {
+        $runtimeConnections = new ConnectionRegistry();
+        $listener = new AmqpListener(
+            $runtimeConnections,
+            '127.0.0.1',
+            0,
+            authenticator: $this->authenticator(),
+            tls: $this->tlsConfig(),
+            limits: new ResourceLimits(maxConnections: 1)
+        );
+        $listener->start();
+
+        try {
+            $first = $this->connectTls($listener);
+            $this->connectAmqp($listener, $first, 60);
+            self::assertSame(1, $runtimeConnections->count());
+
+            $second = $this->connect($listener);
+            $this->awaitEof($listener, $second);
+            fclose($second);
+            fclose($first);
+        } finally {
+            $listener->stop();
+        }
+    }
+
+    public function testChannelLimitClosesRejectedChannelAndKeepsConnectionHealthy(): void
+    {
+        $listener = new AmqpListener(
+            new ConnectionRegistry(),
+            '127.0.0.1',
+            0,
+            authenticator: $this->authenticator(),
+            limits: new ResourceLimits(maxChannelsPerConnection: 1)
+        );
+        $listener->start();
+
+        try {
+            $client = $this->connect($listener);
+            $codec = new FrameCodec();
+            $this->connectAmqp($listener, $client, 60);
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            $close = $this->readFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(506, $this->replyCode($close));
+            self::assertSame(1, $listener->connectionCount());
+            fclose($client);
+        } finally {
+            $listener->stop();
+        }
+    }
+
+    public function testInvalidTlsCertificatePathFailsClearly(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('AMQP TLS certificate file');
+
+        new AmqpTlsConfig(__DIR__ . '/missing.crt', __FILE__);
+    }
+
+    public function testInvalidTlsKeyPathFailsClearly(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('AMQP TLS private key file');
+
+        new AmqpTlsConfig(__FILE__, __DIR__ . '/missing.key');
+    }
+
+    public function testMalformedTlsClientDoesNotCrashListener(): void
+    {
+        $listener = new AmqpListener(new ConnectionRegistry(), '127.0.0.1', 0, authenticator: $this->authenticator(), tls: $this->tlsConfig());
+        $listener->start();
+
+        try {
+            $client = $this->connect($listener);
+            fwrite($client, "not tls");
+
+            for ($attempt = 0; $attempt < 20; $attempt++) {
+                $listener->tick();
+                if (feof($client)) {
+                    break;
+                }
+                usleep(1000);
+            }
+
+            self::assertTrue(feof($client));
+            fclose($client);
+            $listener->tick();
+            self::assertSame(0, $listener->connectionCount());
+        } finally {
+            $listener->stop();
+        }
+    }
+
+    public function testStopClosesTlsClients(): void
+    {
+        $listener = new AmqpListener(new ConnectionRegistry(), '127.0.0.1', 0, authenticator: $this->authenticator(), tls: $this->tlsConfig());
+        $listener->start();
+
+        $client = $this->connectTls($listener);
+        $this->connectAmqp($listener, $client, 60);
+        self::assertSame(1, $listener->connectionCount());
+
+        $listener->stop();
+
+        for ($attempt = 0; $attempt < 20 && !feof($client); $attempt++) {
+            fread($client, 8192);
+            usleep(1000);
+        }
+
+        self::assertTrue(feof($client));
+        fclose($client);
     }
 
     public function testIdleConnectionSendsHeartbeatFrame(): void
@@ -202,6 +379,35 @@ final class AmqpListenerTest extends TestCase
         return $client;
     }
 
+    private function connectTls(AmqpListener $listener): mixed
+    {
+        $client = $this->connect($listener);
+        stream_context_set_options($client, [
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+                'allow_self_signed' => true,
+                'crypto_method' => $this->clientCryptoMethod(),
+            ],
+        ]);
+
+        for ($attempt = 0; $attempt < 200; $attempt++) {
+            $listener->tick();
+            $result = @stream_socket_enable_crypto($client, true, $this->clientCryptoMethod());
+            if ($result === true) {
+                return $client;
+            }
+
+            if ($result === false) {
+                self::fail('TLS handshake failed.');
+            }
+
+            usleep(1000);
+        }
+
+        self::fail('Timed out waiting for TLS handshake.');
+    }
+
     /**
      * @param resource $client
      * @return array{0: int, 1: int}
@@ -249,6 +455,30 @@ final class AmqpListenerTest extends TestCase
         self::assertSame([10, 41], $this->readMethod($listener, $client));
     }
 
+    /**
+     * @param resource $client
+     */
+    private function awaitEof(AmqpListener $listener, mixed $client): void
+    {
+        for ($attempt = 0; $attempt < 100; $attempt++) {
+            $listener->tick();
+            fread($client, 8192);
+            if (feof($client)) {
+                return;
+            }
+            usleep(1000);
+        }
+
+        self::fail('Expected AMQP client socket to close.');
+    }
+
+    private function replyCode(Frame $frame): int
+    {
+        $value = unpack('nreplyCode', substr($frame->payload, 4, 2));
+
+        return (int) $value['replyCode'];
+    }
+
     private function tuneOk(int $heartbeat): string
     {
         return pack('nNn', 0, 131072, $heartbeat);
@@ -280,6 +510,32 @@ final class AmqpListenerTest extends TestCase
     private function authenticator(): AuthenticationService
     {
         return new ListenerAuthenticationService();
+    }
+
+    private function tlsConfig(): AmqpTlsConfig
+    {
+        try {
+            $tls = TlsCertificate::create();
+        } catch (RuntimeException $exception) {
+            self::markTestSkipped($exception->getMessage());
+        }
+
+        return new AmqpTlsConfig($tls['cert'], $tls['key']);
+    }
+
+    private function clientCryptoMethod(): int
+    {
+        $method = 0;
+
+        if (defined('STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT')) {
+            $method |= STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT;
+        }
+
+        if (defined('STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT')) {
+            $method |= STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT;
+        }
+
+        return $method !== 0 ? $method : STREAM_CRYPTO_METHOD_TLS_CLIENT;
     }
 }
 
