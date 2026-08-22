@@ -89,6 +89,45 @@ SQL);
         );
     }
 
+    public function delete(int $virtualHostId, string $name): bool
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+DELETE FROM routing_sources
+WHERE virtual_host_id = :virtual_host_id
+  AND name = :name
+SQL);
+        $statement->bindValue('virtual_host_id', $virtualHostId, PDO::PARAM_INT);
+        $statement->bindValue('name', $name);
+        $statement->execute();
+
+        return $statement->rowCount() === 1;
+    }
+
+    public function deleteGraph(int $virtualHostId, string $name): bool
+    {
+        return $this->connection->transaction(function (PDO $pdo) use ($virtualHostId, $name): bool {
+            $bindings = $pdo->prepare(<<<'SQL'
+DELETE FROM bindings
+WHERE virtual_host_id = :virtual_host_id
+  AND source = :source
+SQL);
+            $bindings->bindValue('virtual_host_id', $virtualHostId, PDO::PARAM_INT);
+            $bindings->bindValue('source', $name);
+            $bindings->execute();
+
+            $source = $pdo->prepare(<<<'SQL'
+DELETE FROM routing_sources
+WHERE virtual_host_id = :virtual_host_id
+  AND name = :name
+SQL);
+            $source->bindValue('virtual_host_id', $virtualHostId, PDO::PARAM_INT);
+            $source->bindValue('name', $name);
+            $source->execute();
+
+            return $source->rowCount() === 1;
+        });
+    }
+
     /**
      * @param array{
      *     id: mixed,

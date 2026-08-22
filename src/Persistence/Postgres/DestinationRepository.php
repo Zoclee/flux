@@ -131,6 +131,35 @@ SQL);
         return (int) $statement->fetchColumn();
     }
 
+    public function deleteQueueGraph(int $destinationId): int
+    {
+        return $this->connection->transaction(function (PDO $pdo) use ($destinationId): int {
+            $count = $pdo->prepare(<<<'SQL'
+SELECT COUNT(*)
+FROM deliveries
+WHERE destination_id = :destination_id
+  AND state IN ('pending', 'reserved')
+SQL);
+            $count->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+            $count->execute();
+            $deletedMessageCount = (int) $count->fetchColumn();
+
+            foreach ([
+                'DELETE FROM deliveries WHERE destination_id = :destination_id',
+                'DELETE FROM subscriptions WHERE destination_id = :destination_id',
+                'DELETE FROM bindings WHERE destination_id = :destination_id',
+                'DELETE FROM message_routes WHERE destination_id = :destination_id',
+                'DELETE FROM destinations WHERE id = :destination_id',
+            ] as $sql) {
+                $statement = $pdo->prepare($sql);
+                $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+                $statement->execute();
+            }
+
+            return $deletedMessageCount;
+        });
+    }
+
     /**
      * @param array{
      *     id: mixed,

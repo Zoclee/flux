@@ -342,6 +342,92 @@ final readonly class Broker
         return $bindings->create($virtualHost->id, $source, $destination->id, $routingKey, ['declared_by' => 'topology']);
     }
 
+    public function purgeQueue(string $virtualHostName, string $queue): int
+    {
+        $destination = $this->queueDestination($virtualHostName, $queue);
+
+        return $this->deliveries->rejectOutstandingByDestination($destination->id);
+    }
+
+    public function deleteQueue(string $virtualHostName, string $queue, bool $ifEmpty = false): int
+    {
+        $destination = $this->queueDestination($virtualHostName, $queue);
+
+        if ($ifEmpty && $this->deliveries->countOutstandingByDestination($destination->id) > 0) {
+            throw new TopologyException(sprintf('Queue "%s" is not empty.', $queue), TopologyException::PRECONDITION_FAILED);
+        }
+
+        return $this->destinations->deleteQueueGraph($destination->id);
+    }
+
+    public function unbindQueue(string $virtualHostName, string $source, string $queue, string $routingKey): void
+    {
+        if ($source === '') {
+            throw new TopologyException(
+                'The default AMQP exchange binding is implicit and cannot be unbound.',
+                TopologyException::PRECONDITION_FAILED
+            );
+        }
+
+        $virtualHost = $this->virtualHosts->findByName($virtualHostName);
+        if ($virtualHost === null) {
+            throw VirtualHostNotFoundException::forName($virtualHostName);
+        }
+
+        $destination = $this->destinations->findByName($virtualHost->id, $queue);
+        if ($destination === null || $destination->type !== DestinationType::Queue) {
+            throw new TopologyException(sprintf('Queue "%s" does not exist.', $queue), TopologyException::NOT_FOUND);
+        }
+
+        if ($this->routingSources()->findByName($virtualHost->id, $source) === null) {
+            throw new TopologyException(sprintf('Routing source "%s" does not exist.', $source), TopologyException::NOT_FOUND);
+        }
+
+        $this->bindings()->deleteExact($virtualHost->id, $source, $destination->id, $routingKey);
+    }
+
+    public function deleteRoutingSource(string $virtualHostName, string $name, bool $ifUnused = false): void
+    {
+        if ($name === '') {
+            throw new TopologyException(
+                'The default AMQP exchange is implicit and cannot be deleted.',
+                TopologyException::PRECONDITION_FAILED
+            );
+        }
+
+        $virtualHost = $this->virtualHosts->findByName($virtualHostName);
+        if ($virtualHost === null) {
+            throw VirtualHostNotFoundException::forName($virtualHostName);
+        }
+
+        $routingSources = $this->routingSources();
+        if ($routingSources->findByName($virtualHost->id, $name) === null) {
+            throw new TopologyException(sprintf('Routing source "%s" does not exist.', $name), TopologyException::NOT_FOUND);
+        }
+
+        $bindings = $this->bindings();
+        if ($ifUnused && $bindings->countBySource($virtualHost->id, $name) > 0) {
+            throw new TopologyException(sprintf('Routing source "%s" is in use.', $name), TopologyException::PRECONDITION_FAILED);
+        }
+
+        $routingSources->deleteGraph($virtualHost->id, $name);
+    }
+
+    private function queueDestination(string $virtualHostName, string $queue): Destination
+    {
+        $virtualHost = $this->virtualHosts->findByName($virtualHostName);
+        if ($virtualHost === null) {
+            throw VirtualHostNotFoundException::forName($virtualHostName);
+        }
+
+        $destination = $this->destinations->findByName($virtualHost->id, $queue);
+        if ($destination === null || $destination->type !== DestinationType::Queue) {
+            throw new TopologyException(sprintf('Queue "%s" does not exist.', $queue), TopologyException::NOT_FOUND);
+        }
+
+        return $destination;
+    }
+
     private function bindings(): BindingRepository
     {
         return $this->bindings ?? throw new RuntimeException('Broker topology binding repository is not configured.');

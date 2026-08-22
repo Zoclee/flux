@@ -140,6 +140,38 @@ SQL);
         return $counts;
     }
 
+    public function countOutstandingByDestination(int $destinationId): int
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT COUNT(*)
+FROM deliveries
+WHERE destination_id = :destination_id
+  AND state IN ('pending', 'reserved')
+SQL);
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->execute();
+
+        return (int) $statement->fetchColumn();
+    }
+
+    public function rejectOutstandingByDestination(int $destinationId): int
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+UPDATE deliveries
+SET state = 'rejected',
+    consumer_id = NULL,
+    delivery_tag = NULL,
+    reserved_at = NULL,
+    updated_at = CURRENT_TIMESTAMP
+WHERE destination_id = :destination_id
+  AND state IN ('pending', 'reserved')
+SQL);
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->execute();
+
+        return $statement->rowCount();
+    }
+
     public function reserveNext(int $subscriptionId, string $consumerId, ?string $deliveryTag = null): ?Delivery
     {
         return $this->connection->transaction(function (PDO $pdo) use ($subscriptionId, $consumerId, $deliveryTag): ?Delivery {

@@ -336,6 +336,96 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame(DeliveryState::Rejected, $this->singleDelivery('orders')->state);
     }
 
+    public function testBasicGetReturnsAvailableMessageWithBinaryBodyAndManualAck(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $payload = "get\x00binary\xff";
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', [$payload]);
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('orders'));
+            $get = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 71], $get->method());
+            self::assertSame(1, $this->deliveryTagFromBasicGetOk($get));
+            $header = $this->readFrame($listener, $client);
+            self::assertSame(strlen($payload), $this->bodySizeFromHeader($header));
+            self::assertSame($payload, $this->readFrame($listener, $client)->payload);
+            self::assertSame(DeliveryState::Reserved, $this->singleDelivery('orders')->state);
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong(1) . "\x00");
+            $listener->tick();
+            self::assertSame(DeliveryState::Acknowledged, $this->singleDelivery('orders')->state);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testBasicGetEmptyWhenNoMessageIsAvailable(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('orders'));
+
+            self::assertSame([60, 72], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testBasicGetNoAckSettlesDeliveryImmediately(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['auto']);
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('orders', true));
+            self::assertSame([60, 71], $this->readMethod($listener, $client));
+            $this->readFrame($listener, $client);
+            self::assertSame('auto', $this->readFrame($listener, $client)->payload);
+            self::assertSame(DeliveryState::Acknowledged, $this->singleDelivery('orders')->state);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testQueueDeleteIfUnusedRejectsQueueWithActiveConsumerAndRuntimeContinues(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 50, 40, $this->queueDelete('orders', ifUnused: true));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
+            self::assertSame(1, $listener->connectionCount());
+
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testDisconnectReleasesUnackedDeliveries(): void
     {
         [$listener, $client] = $this->startedListener();
@@ -1206,9 +1296,25 @@ final class AmqpPublishConsumeTest extends TestCase
         return pack('n', 0) . $this->shortString($queue) . $this->shortString($consumerTag) . "\x00" . pack('N', 0);
     }
 
-    private function basicGet(string $queue): string
+    private function basicGet(string $queue, bool $noAck = false): string
     {
-        return pack('n', 0) . $this->shortString($queue) . "\x00";
+        return pack('n', 0) . $this->shortString($queue) . chr($noAck ? 1 : 0);
+    }
+
+    private function queueDelete(string $queue, bool $ifUnused = false, bool $ifEmpty = false, bool $noWait = false): string
+    {
+        $bits = 0;
+        if ($ifUnused) {
+            $bits |= 0b00000001;
+        }
+        if ($ifEmpty) {
+            $bits |= 0b00000010;
+        }
+        if ($noWait) {
+            $bits |= 0b00000100;
+        }
+
+        return pack('n', 0) . $this->shortString($queue) . chr($bits);
     }
 
     private function basicQos(int $prefetchSize, int $prefetchCount, bool $global): string
@@ -1375,6 +1481,13 @@ final class AmqpPublishConsumeTest extends TestCase
     }
 
     private function deliveryTagFromBasicAck(Frame $frame): int
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+
+        return $reader->readLongLong();
+    }
+
+    private function deliveryTagFromBasicGetOk(Frame $frame): int
     {
         $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
 

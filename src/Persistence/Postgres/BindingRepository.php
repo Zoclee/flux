@@ -143,6 +143,21 @@ SQL);
         return (int) $statement->fetchColumn();
     }
 
+    public function countBySource(int $virtualHostId, string $source): int
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+SELECT COUNT(*)
+FROM bindings
+WHERE virtual_host_id = :virtual_host_id
+  AND source = :source
+SQL);
+        $statement->bindValue('virtual_host_id', $virtualHostId, PDO::PARAM_INT);
+        $statement->bindValue('source', $source);
+        $statement->execute();
+
+        return (int) $statement->fetchColumn();
+    }
+
     /**
      * @return list<Binding>
      */
@@ -170,6 +185,38 @@ SQL);
         $statement->execute();
 
         return $statement->rowCount() === 1;
+    }
+
+    public function deleteExact(int $virtualHostId, string $source, int $destinationId, string $routingKey): bool
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+DELETE FROM bindings
+WHERE virtual_host_id = :virtual_host_id
+  AND source = :source
+  AND destination_id = :destination_id
+  AND routing_key = :routing_key
+SQL);
+        $statement->bindValue('virtual_host_id', $virtualHostId, PDO::PARAM_INT);
+        $statement->bindValue('source', $source);
+        $statement->bindValue('destination_id', $destinationId, PDO::PARAM_INT);
+        $statement->bindValue('routing_key', $routingKey);
+        $statement->execute();
+
+        return $statement->rowCount() === 1;
+    }
+
+    public function deleteBySource(int $virtualHostId, string $source): int
+    {
+        $statement = $this->connection->pdo()->prepare(<<<'SQL'
+DELETE FROM bindings
+WHERE virtual_host_id = :virtual_host_id
+  AND source = :source
+SQL);
+        $statement->bindValue('virtual_host_id', $virtualHostId, PDO::PARAM_INT);
+        $statement->bindValue('source', $source);
+        $statement->execute();
+
+        return $statement->rowCount();
     }
 
     /**

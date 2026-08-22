@@ -91,7 +91,7 @@ final class AmqpConnection
     private array $nextDeliveryTags = [];
 
     /**
-     * @var array<int, array<int, array{delivery: Delivery, consumer_tag: string}>>
+     * @var array<int, array<int, array{delivery: Delivery, consumer_tag: string, queue: string}>>
      */
     private array $unackedDeliveries = [];
 
@@ -360,6 +360,10 @@ final class AmqpConnection
                 [50, 10] => $this->handleQueueDeclare($frame),
                 [40, 10] => $this->handleExchangeDeclare($frame),
                 [50, 20] => $this->handleQueueBind($frame),
+                [50, 30] => $this->handleQueuePurge($frame),
+                [50, 40] => $this->handleQueueDelete($frame),
+                [50, 50] => $this->handleQueueUnbind($frame),
+                [40, 20] => $this->handleExchangeDelete($frame),
                 [85, 10] => $this->handleConfirmSelect($frame),
                 [60, 10] => $this->handleBasicQos($frame),
                 [60, 40] => $this->handleBasicPublish($frame),
@@ -604,6 +608,100 @@ final class AmqpConnection
         }
     }
 
+    private function handleQueuePurge(Frame $frame): void
+    {
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readShort();
+        $queue = $reader->readShortString();
+        $bits = $reader->readOctet();
+        $noWait = ($bits & 0b00000001) !== 0;
+        $reader->assertComplete();
+
+        if (
+            !$this->authorizeResource($frame->channel, AuthorizationPermission::Configure, $queue, 50, 30)
+            || !$this->authorizeResource($frame->channel, AuthorizationPermission::Write, $queue, 50, 30)
+        ) {
+            return;
+        }
+
+        $messageCount = $this->broker()->purgeQueue($this->openedVirtualHost(), $queue);
+        $this->clearUnackedForQueue($queue);
+
+        if (!$noWait) {
+            $this->writeFrame(Frame::methodFrame($frame->channel, 50, 31, pack('N', $messageCount)));
+        }
+    }
+
+    private function handleQueueDelete(Frame $frame): void
+    {
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readShort();
+        $queue = $reader->readShortString();
+        $bits = $reader->readOctet();
+        $ifUnused = ($bits & 0b00000001) !== 0;
+        $ifEmpty = ($bits & 0b00000010) !== 0;
+        $noWait = ($bits & 0b00000100) !== 0;
+        $reader->assertComplete();
+
+        if (!$this->authorizeResource($frame->channel, AuthorizationPermission::Configure, $queue, 50, 40)) {
+            return;
+        }
+
+        if ($ifUnused && $this->queueHasActiveConsumer($queue)) {
+            throw new TopologyException(sprintf('Queue "%s" is in use.', $queue), TopologyException::PRECONDITION_FAILED);
+        }
+
+        $messageCount = $this->broker()->deleteQueue($this->openedVirtualHost(), $queue, $ifEmpty);
+        $this->removeConsumersForQueue($queue);
+        $this->clearUnackedForQueue($queue);
+
+        if (!$noWait) {
+            $this->writeFrame(Frame::methodFrame($frame->channel, 50, 41, pack('N', $messageCount)));
+        }
+    }
+
+    private function handleQueueUnbind(Frame $frame): void
+    {
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readShort();
+        $queue = $reader->readShortString();
+        $exchange = $reader->readShortString();
+        $routingKey = $reader->readShortString();
+        $reader->skipTable();
+        $reader->assertComplete();
+
+        if (
+            !$this->authorizeResource($frame->channel, AuthorizationPermission::Configure, $queue, 50, 50)
+            || ($exchange !== '' && !$this->authorizeResource($frame->channel, AuthorizationPermission::Configure, $exchange, 50, 50))
+        ) {
+            return;
+        }
+
+        $this->broker()->unbindQueue($this->openedVirtualHost(), $exchange, $queue, $routingKey);
+        $this->writeFrame(Frame::methodFrame($frame->channel, 50, 51));
+    }
+
+    private function handleExchangeDelete(Frame $frame): void
+    {
+        $reader = new AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readShort();
+        $exchange = $reader->readShortString();
+        $bits = $reader->readOctet();
+        $ifUnused = ($bits & 0b00000001) !== 0;
+        $noWait = ($bits & 0b00000010) !== 0;
+        $reader->assertComplete();
+
+        if (!$this->authorizeResource($frame->channel, AuthorizationPermission::Configure, $exchange, 40, 20)) {
+            return;
+        }
+
+        $this->broker()->deleteRoutingSource($this->openedVirtualHost(), $exchange, $ifUnused);
+
+        if (!$noWait) {
+            $this->writeFrame(Frame::methodFrame($frame->channel, 40, 21));
+        }
+    }
+
     private function handleBasicPublish(Frame $frame): void
     {
         if (isset($this->pendingPublishMethods[$frame->channel]) || isset($this->pendingPublishes[$frame->channel])) {
@@ -701,14 +799,55 @@ final class AmqpConnection
         $reader = new AmqpMethodReader(substr($frame->payload, 4));
         $reader->readShort();
         $queue = $reader->readShortString();
-        $reader->readOctet();
+        $bits = $reader->readOctet();
+        $noAck = ($bits & 0b00000001) !== 0;
         $reader->assertComplete();
 
         if (!$this->authorizeResource($frame->channel, AuthorizationPermission::Read, $queue, 60, 70)) {
             return;
         }
 
-        $this->sendChannelError($frame->channel, 540, 'NOT_IMPLEMENTED - basic.get is not supported by Flux yet', 60, 70);
+        $this->broker()->ensureQueueSubscription($this->openedVirtualHost(), $queue, 'amqp');
+        $deliveryTag = $this->nextDeliveryTags[$frame->channel] ?? 1;
+        $delivery = $this->broker()->reserve(new ReserveRequest(
+            $this->openedVirtualHost(),
+            $queue,
+            'amqp',
+            $this->runtimeConnection->id,
+            (string) $deliveryTag
+        ));
+
+        if ($delivery === null) {
+            $this->writeFrame(Frame::methodFrame($frame->channel, 60, 72, $this->shortString('')));
+            return;
+        }
+
+        $message = $this->broker()->messageForDelivery($delivery);
+        $this->writeFrame(Frame::methodFrame(
+            $frame->channel,
+            60,
+            71,
+            $this->packLongLong($deliveryTag)
+                . chr($delivery->attempts > 1 ? 1 : 0)
+                . $this->shortString('')
+                . $this->shortString($queue)
+                . pack('N', 0)
+        ));
+        $this->writeFrame(new Frame(Frame::TYPE_HEADER, $frame->channel, $this->contentHeader($message)));
+        foreach (str_split($message->payload, $this->outboundBodyChunkSize()) as $chunk) {
+            $this->writeFrame(new Frame(Frame::TYPE_BODY, $frame->channel, $chunk));
+        }
+
+        $this->nextDeliveryTags[$frame->channel] = $deliveryTag + 1;
+        if ($noAck) {
+            $this->broker()->acknowledge(new AcknowledgeRequest($delivery->id));
+        } else {
+            $this->unackedDeliveries[$frame->channel][$deliveryTag] = [
+                'delivery' => $delivery,
+                'consumer_tag' => '',
+                'queue' => $queue,
+            ];
+        }
     }
 
     private function handleBasicAck(Frame $frame): void
@@ -1013,12 +1152,13 @@ final class AmqpConnection
             if ($state['no_ack']) {
                 $this->broker()->acknowledge(new AcknowledgeRequest($delivery->id));
             } else {
-                $this->unackedDeliveries[$channel][$deliveryTag] = [
-                    'delivery' => $delivery,
-                    'consumer_tag' => $consumerTag,
-                ];
-            }
+            $this->unackedDeliveries[$channel][$deliveryTag] = [
+                'delivery' => $delivery,
+                'consumer_tag' => $consumerTag,
+                'queue' => $state['queue'],
+            ];
         }
+    }
     }
 
     private function sendDelivery(
@@ -1116,6 +1256,28 @@ final class AmqpConnection
         unset($this->activeConsumers[$consumerTag]);
     }
 
+    private function removeConsumersForQueue(string $queue): void
+    {
+        foreach (array_keys($this->activeConsumers) as $consumerTag) {
+            if (($this->activeConsumers[$consumerTag]['queue'] ?? null) === $queue) {
+                $this->removeConsumer($consumerTag);
+            }
+        }
+    }
+
+    private function clearUnackedForQueue(string $queue): void
+    {
+        foreach ($this->unackedDeliveries as $channel => $deliveries) {
+            foreach ($deliveries as $deliveryTag => $mapping) {
+                if ($mapping['queue'] === $queue) {
+                    unset($this->unackedDeliveries[$channel][$deliveryTag]);
+                }
+            }
+
+            $this->clearEmptyUnackedChannel($channel);
+        }
+    }
+
     private function releaseOutstandingDeliveries(?int $channel = null): void
     {
         $released = 0;
@@ -1176,6 +1338,17 @@ final class AmqpConnection
         }
 
         return $count;
+    }
+
+    private function queueHasActiveConsumer(string $queue): bool
+    {
+        foreach ($this->activeConsumers as $state) {
+            if ($state['queue'] === $queue) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function outboundBodyChunkSize(): int

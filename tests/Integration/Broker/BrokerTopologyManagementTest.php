@@ -1,0 +1,176 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Flux\Tests\Integration\Broker;
+
+use Flux\Broker\Broker;
+use Flux\Broker\DeliveryState;
+use Flux\Broker\Destination;
+use Flux\Broker\PublishRequest;
+use Flux\Broker\TopologyException;
+use Flux\Persistence\Postgres\BindingRepository;
+use Flux\Persistence\Postgres\Connection;
+use Flux\Persistence\Postgres\DeliveryRepository;
+use Flux\Persistence\Postgres\DestinationRepository;
+use Flux\Persistence\Postgres\MessageRepository;
+use Flux\Persistence\Postgres\MessageRouteRepository;
+use Flux\Persistence\Postgres\Migrator;
+use Flux\Persistence\Postgres\PublishTransaction;
+use Flux\Persistence\Postgres\RoutingSourceRepository;
+use Flux\Persistence\Postgres\SubscriptionRepository;
+use Flux\Persistence\Postgres\VirtualHostRepository;
+use PDO;
+use PHPUnit\Framework\Attributes\Before;
+use PHPUnit\Framework\TestCase;
+
+final class BrokerTopologyManagementTest extends TestCase
+{
+    private Connection $connection;
+    private PDO $pdo;
+    private Broker $broker;
+    private DestinationRepository $destinations;
+    private DeliveryRepository $deliveries;
+    private BindingRepository $bindings;
+    private RoutingSourceRepository $routingSources;
+    private int $virtualHostId;
+
+    #[Before]
+    public function setUpBroker(): void
+    {
+        if (!extension_loaded('pdo_pgsql')) {
+            self::markTestSkipped('The pdo_pgsql extension is required for PostgreSQL integration tests.');
+        }
+
+        $dsn = getenv('FLUX_TEST_DATABASE_URL');
+        if ($dsn === false || $dsn === '') {
+            self::markTestSkipped('Set FLUX_TEST_DATABASE_URL to run PostgreSQL broker integration tests.');
+        }
+
+        $this->connection = Connection::fromDsn($dsn);
+        $this->pdo = $this->connection->pdo();
+        $this->assertSafeTestDatabase();
+        $this->resetSchema();
+        (new Migrator($this->connection, dirname(__DIR__, 3) . '/database/migrations'))->migrate();
+
+        $virtualHosts = new VirtualHostRepository($this->connection);
+        $this->destinations = new DestinationRepository($this->connection);
+        $subscriptions = new SubscriptionRepository($this->connection);
+        $this->deliveries = new DeliveryRepository($this->connection);
+        $this->bindings = new BindingRepository($this->connection);
+        $this->routingSources = new RoutingSourceRepository($this->connection);
+        $this->broker = new Broker(
+            $virtualHosts,
+            new PublishTransaction($this->connection),
+            $this->destinations,
+            $subscriptions,
+            $this->deliveries,
+            $this->bindings,
+            $this->routingSources,
+            new MessageRouteRepository($this->connection),
+            new MessageRepository($this->connection)
+        );
+        $this->virtualHostId = $virtualHosts->findByName('/')?->id
+            ?? throw new \RuntimeException('Default virtual host was not created by migrations.');
+    }
+
+    public function testPurgeQueueRejectsOutstandingWorkWithoutDeletingPayload(): void
+    {
+        $queue = $this->broker->declareQueue('/', 'orders', true, false);
+        $this->createDelivery($queue, 'payload');
+
+        $count = $this->broker->purgeQueue('/', 'orders');
+
+        self::assertSame(1, $count);
+        self::assertSame(1, $this->deliveryStateCount($queue->id, DeliveryState::Rejected));
+        self::assertSame(1, $this->tableCount('messages'));
+        self::assertNotNull($this->destinations->findByName($this->virtualHostId, 'orders'));
+    }
+
+    public function testDeleteQueueRemovesQueueGraphButLeavesMessagePayloads(): void
+    {
+        $queue = $this->broker->declareQueue('/', 'orders', true, false);
+        $this->createDelivery($queue, 'payload');
+
+        $count = $this->broker->deleteQueue('/', 'orders');
+
+        self::assertSame(1, $count);
+        self::assertNull($this->destinations->findByName($this->virtualHostId, 'orders'));
+        self::assertSame(1, $this->tableCount('messages'));
+        self::assertSame(0, $this->tableCount('message_routes'));
+        self::assertSame(0, $this->tableCount('deliveries'));
+    }
+
+    public function testDeleteQueueIfEmptyFailsTransactionallyForOutstandingWork(): void
+    {
+        $queue = $this->broker->declareQueue('/', 'orders', true, false);
+        $this->createDelivery($queue, 'payload');
+
+        try {
+            $this->broker->deleteQueue('/', 'orders', ifEmpty: true);
+            self::fail('Non-empty queue deletion should fail.');
+        } catch (TopologyException $exception) {
+            self::assertSame(TopologyException::PRECONDITION_FAILED, $exception->reason);
+            self::assertNotNull($this->destinations->findByName($this->virtualHostId, 'orders'));
+            self::assertSame(1, $this->tableCount('deliveries'));
+        }
+    }
+
+    public function testUnbindAndDeleteRoutingSourceAffectFutureRoutingOnly(): void
+    {
+        $this->broker->declareQueue('/', 'orders', true, false);
+        $this->broker->declareDirectRoutingSource('/', 'orders.direct', true, false);
+        $this->broker->bindQueue('/', 'orders.direct', 'orders', 'created');
+        $this->broker->unbindQueue('/', 'orders.direct', 'orders', 'created');
+
+        $this->broker->publish(new PublishRequest('/', 'orders.direct', 'created', 'payload'));
+        self::assertSame(1, $this->tableCount('messages'));
+        self::assertSame(0, $this->tableCount('message_routes'));
+
+        $this->broker->deleteRoutingSource('/', 'orders.direct');
+        self::assertNull($this->routingSources->findByName($this->virtualHostId, 'orders.direct'));
+        self::assertSame(0, $this->bindings->countBySource($this->virtualHostId, 'orders.direct'));
+    }
+
+    private function createDelivery(Destination $destination, string $payload): void
+    {
+        $message = (new MessageRepository($this->connection))->create($payload);
+        $route = (new MessageRouteRepository($this->connection))->create($message->id, $destination->id);
+        $subscriptions = new SubscriptionRepository($this->connection);
+        $subscription = $subscriptions->findByName($destination->id, 'amqp')
+            ?? $subscriptions->create($destination->id, 'amqp');
+
+        $this->deliveries->create($route->id, $subscription->id);
+    }
+
+    private function deliveryStateCount(int $destinationId, DeliveryState $state): int
+    {
+        $statement = $this->pdo->prepare('SELECT COUNT(*) FROM deliveries WHERE destination_id = :destination_id AND state = :state');
+        $statement->execute(['destination_id' => $destinationId, 'state' => $state->value]);
+
+        return (int) $statement->fetchColumn();
+    }
+
+    private function tableCount(string $table): int
+    {
+        return (int) $this->pdo->query(sprintf('SELECT count(*) FROM %s', $table))->fetchColumn();
+    }
+
+    private function resetSchema(): void
+    {
+        $this->pdo->exec('DROP SCHEMA public CASCADE');
+        $this->pdo->exec('CREATE SCHEMA public');
+    }
+
+    private function assertSafeTestDatabase(): void
+    {
+        $database = (string) $this->pdo->query('SELECT current_database()')->fetchColumn();
+
+        if (!str_contains(strtolower($database), 'test')) {
+            self::markTestSkipped(sprintf(
+                'Refusing to reset PostgreSQL database "%s"; FLUX_TEST_DATABASE_URL must point to a test database.',
+                $database
+            ));
+        }
+    }
+}

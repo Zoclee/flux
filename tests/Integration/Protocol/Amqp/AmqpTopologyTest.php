@@ -8,12 +8,15 @@ use Flux\Broker\Broker;
 use Flux\Broker\Authorizer;
 use Flux\Broker\Authenticator;
 use Flux\Broker\DestinationType;
+use Flux\Broker\PublishRequest;
 use Flux\Broker\ResourceLimitException;
 use Flux\Broker\ResourceLimits;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\Connection;
 use Flux\Persistence\Postgres\DeliveryRepository;
 use Flux\Persistence\Postgres\DestinationRepository;
+use Flux\Persistence\Postgres\MessageRepository;
+use Flux\Persistence\Postgres\MessageRouteRepository;
 use Flux\Persistence\Postgres\Migrator;
 use Flux\Persistence\Postgres\PublishTransaction;
 use Flux\Persistence\Postgres\RoutingSourceRepository;
@@ -235,6 +238,227 @@ final class AmqpTopologyTest extends TestCase
         }
     }
 
+    public function testQueuePurgeReturnsCountAndDoesNotAffectAnotherDestinationRoute(): void
+    {
+        $orders = $this->broker()->declareQueue('/', 'orders', true, false);
+        $audit = $this->broker()->declareQueue('/', 'audit', true, false);
+        $this->createDelivery($orders->id, 'orders-payload');
+        $this->createDelivery($audit->id, 'audit-payload');
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 30, $this->queuePurge('orders'))));
+            $purgeOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 31], $purgeOk->method());
+            self::assertSame(1, $this->messageCount($purgeOk));
+            self::assertSame(1, $this->deliveryStateCount($orders->id, 'rejected'));
+            self::assertSame(1, $this->deliveryStateCount($audit->id, 'pending'));
+            self::assertSame(2, $this->tableCount('messages'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testDeniedQueuePurgeClosesChannelWithAccessRefused(): void
+    {
+        $this->broker()->declareQueue('/', 'orders', true, false);
+        (new UserRepository($this->connection))->setPermissions('guest', '/', '^$', '.*', '.*');
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 30, $this->queuePurge('orders'))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(403, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testQueueDeleteRemovesQueueGraphButKeepsSharedPayload(): void
+    {
+        $orders = $this->broker()->declareQueue('/', 'orders', true, false);
+        $audit = $this->broker()->declareQueue('/', 'audit', true, false);
+        $message = (new MessageRepository($this->connection))->create('shared');
+        $routes = new MessageRouteRepository($this->connection);
+        $ordersRoute = $routes->create($message->id, $orders->id);
+        $auditRoute = $routes->create($message->id, $audit->id);
+        $subscriptions = new SubscriptionRepository($this->connection);
+        $ordersSubscription = $subscriptions->findByName($orders->id, 'amqp') ?? $subscriptions->create($orders->id, 'amqp');
+        $auditSubscription = $subscriptions->findByName($audit->id, 'amqp') ?? $subscriptions->create($audit->id, 'amqp');
+        $deliveries = new DeliveryRepository($this->connection);
+        $deliveries->create($ordersRoute->id, $ordersSubscription->id);
+        $deliveries->create($auditRoute->id, $auditSubscription->id);
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 40, $this->queueDelete('orders'))));
+            $deleteOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 41], $deleteOk->method());
+            self::assertSame(1, $this->messageCount($deleteOk));
+            self::assertNull((new DestinationRepository($this->connection))->findByName($this->virtualHostId, 'orders'));
+            self::assertNotNull((new DestinationRepository($this->connection))->findByName($this->virtualHostId, 'audit'));
+            self::assertSame(1, $this->tableCount('messages'));
+            self::assertSame(1, $this->deliveryStateCount($audit->id, 'pending'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testQueueDeleteIfEmptyRejectsNonEmptyQueue(): void
+    {
+        $orders = $this->broker()->declareQueue('/', 'orders', true, false);
+        $this->createDelivery($orders->id, 'payload');
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 40, $this->queueDelete('orders', ifEmpty: true))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
+            self::assertNotNull((new DestinationRepository($this->connection))->findByName($this->virtualHostId, 'orders'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testQueueDeleteNoWaitDeletesWithoutOk(): void
+    {
+        $this->broker()->declareQueue('/', 'orders', true, false);
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 40, $this->queueDelete('orders', noWait: true))));
+            $listener->tick();
+
+            self::assertNull((new DestinationRepository($this->connection))->findByName($this->virtualHostId, 'orders'));
+            $this->assertNoFrame($listener, $client);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testQueueUnbindStopsSubsequentDirectRouting(): void
+    {
+        $this->broker()->declareQueue('/', 'orders', true, false);
+        $this->broker()->declareDirectRoutingSource('/', 'orders.direct', true, false);
+        $this->broker()->bindQueue('/', 'orders.direct', 'orders', 'created');
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 50, $this->queueUnbind('orders', 'orders.direct', 'created'))));
+            self::assertSame([50, 51], $this->readMethod($listener, $client));
+
+            $this->broker()->publish(new PublishRequest('/', 'orders.direct', 'created', 'payload'));
+            self::assertSame(0, $this->tableCount('message_routes'));
+            self::assertSame(0, $this->tableCount('deliveries'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testDefaultExchangeCannotBeUnbound(): void
+    {
+        $this->broker()->declareQueue('/', 'orders', true, false);
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 50, $this->queueUnbind('orders', '', 'orders'))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testExchangeDeleteRemovesDirectExchangeAndBindings(): void
+    {
+        $this->broker()->declareQueue('/', 'orders', true, false);
+        $this->broker()->declareDirectRoutingSource('/', 'orders.direct', true, false);
+        $this->broker()->bindQueue('/', 'orders.direct', 'orders', 'created');
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 20, $this->exchangeDelete('orders.direct'))));
+
+            self::assertSame([40, 21], $this->readMethod($listener, $client));
+            self::assertNull((new RoutingSourceRepository($this->connection))->findByName($this->virtualHostId, 'orders.direct'));
+            self::assertSame(0, $this->tableCount('bindings'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testExchangeDeleteIfUnusedRejectsBoundExchange(): void
+    {
+        $this->broker()->declareQueue('/', 'orders', true, false);
+        $this->broker()->declareDirectRoutingSource('/', 'orders.direct', true, false);
+        $this->broker()->bindQueue('/', 'orders.direct', 'orders', 'created');
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 20, $this->exchangeDelete('orders.direct', ifUnused: true))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
+            self::assertNotNull((new RoutingSourceRepository($this->connection))->findByName($this->virtualHostId, 'orders.direct'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testDefaultExchangeCannotBeDeleted(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 40, 20, $this->exchangeDelete(''))));
+            $close = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     /**
      * @return array{0: AmqpListener, 1: resource}
      */
@@ -296,6 +520,49 @@ final class AmqpTopologyTest extends TestCase
             . $this->shortString($routingKey)
             . "\x00"
             . pack('N', 0);
+    }
+
+    private function queuePurge(string $queue, bool $noWait = false): string
+    {
+        return pack('n', 0) . $this->shortString($queue) . chr($noWait ? 1 : 0);
+    }
+
+    private function queueDelete(string $queue, bool $ifUnused = false, bool $ifEmpty = false, bool $noWait = false): string
+    {
+        $bits = 0;
+        if ($ifUnused) {
+            $bits |= 0b00000001;
+        }
+        if ($ifEmpty) {
+            $bits |= 0b00000010;
+        }
+        if ($noWait) {
+            $bits |= 0b00000100;
+        }
+
+        return pack('n', 0) . $this->shortString($queue) . chr($bits);
+    }
+
+    private function queueUnbind(string $queue, string $exchange, string $routingKey): string
+    {
+        return pack('n', 0)
+            . $this->shortString($queue)
+            . $this->shortString($exchange)
+            . $this->shortString($routingKey)
+            . pack('N', 0);
+    }
+
+    private function exchangeDelete(string $exchange, bool $ifUnused = false, bool $noWait = false): string
+    {
+        $bits = 0;
+        if ($ifUnused) {
+            $bits |= 0b00000001;
+        }
+        if ($noWait) {
+            $bits |= 0b00000010;
+        }
+
+        return pack('n', 0) . $this->shortString($exchange) . chr($bits);
     }
 
     private function shortString(string $value): string
@@ -374,6 +641,54 @@ final class AmqpTopologyTest extends TestCase
         $value = unpack('nreplyCode', substr($frame->payload, 4, 2));
 
         return (int) $value['replyCode'];
+    }
+
+    private function messageCount(Frame $frame): int
+    {
+        $value = unpack('NmessageCount', substr($frame->payload, 4, 4));
+
+        return (int) $value['messageCount'];
+    }
+
+    private function assertNoFrame(AmqpListener $listener, mixed $client): void
+    {
+        for ($attempt = 0; $attempt < 10; $attempt++) {
+            $listener->tick();
+            $bytes = fread($client, 8192);
+            if (is_string($bytes) && $bytes !== '') {
+                $frames = (new FrameCodec())->push($bytes);
+                if ($frames !== []) {
+                    self::fail('Unexpected AMQP frame was received.');
+                }
+            }
+            usleep(1000);
+        }
+
+        self::assertTrue(true);
+    }
+
+    private function createDelivery(int $destinationId, string $payload): void
+    {
+        $message = (new MessageRepository($this->connection))->create($payload);
+        $route = (new MessageRouteRepository($this->connection))->create($message->id, $destinationId);
+        $subscriptions = new SubscriptionRepository($this->connection);
+        $subscription = $subscriptions->findByName($destinationId, 'amqp')
+            ?? $subscriptions->create($destinationId, 'amqp');
+
+        (new DeliveryRepository($this->connection))->create($route->id, $subscription->id);
+    }
+
+    private function deliveryStateCount(int $destinationId, string $state): int
+    {
+        $statement = $this->pdo->prepare('SELECT COUNT(*) FROM deliveries WHERE destination_id = :destination_id AND state = :state');
+        $statement->execute(['destination_id' => $destinationId, 'state' => $state]);
+
+        return (int) $statement->fetchColumn();
+    }
+
+    private function tableCount(string $table): int
+    {
+        return (int) $this->pdo->query(sprintf('SELECT count(*) FROM %s', $table))->fetchColumn();
     }
 
     private function broker(?ResourceLimits $limits = null): Broker
