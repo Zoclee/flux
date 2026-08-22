@@ -53,12 +53,14 @@ final readonly class BrokerStatsCommand
         $this->write($output, "Runtime:\n");
         if ($runtimeAvailable) {
             $limits = is_array($runtime['limits'] ?? null) ? $runtime['limits'] : [];
+            $this->write($output, sprintf("  State:       %s\n", self::runtimeState((string) ($runtime['state'] ?? 'unknown'))));
             $this->write($output, sprintf(
                 "  Connections: %d / %s\n",
                 (int) ($runtime['connections'] ?? 0),
                 self::limit((int) ($limits['max_connections'] ?? 0))
             ));
-            $this->write($output, sprintf("  Consumers:   %d\n\n", (int) ($runtime['consumers'] ?? 0)));
+            $this->write($output, sprintf("  Consumers:   %d\n", (int) ($runtime['consumers'] ?? 0)));
+            $this->write($output, sprintf("  Unacked:     %d\n\n", (int) ($runtime['unacked'] ?? 0)));
         } else {
             $this->write($output, "  Runtime: unavailable\n\n");
         }
@@ -88,6 +90,19 @@ final readonly class BrokerStatsCommand
     private static function limit(int $limit): string
     {
         return $limit === 0 ? 'unlimited' : (string) $limit;
+    }
+
+    private static function runtimeState(string $state): string
+    {
+        return match ($state) {
+            'created' => 'Created',
+            'starting' => 'Starting',
+            'running' => 'Running',
+            'draining' => 'Draining',
+            'stopping' => 'Stopping',
+            'stopped' => 'Stopped',
+            default => 'Unknown',
+        };
     }
 
     /**

@@ -38,4 +38,7 @@ return [
         'host' => getenv('FLUX_DIAGNOSTICS_HOST') ?: '127.0.0.1',
         'port' => (int) (getenv('FLUX_DIAGNOSTICS_PORT') ?: 5673),
     ],
+    'shutdown' => [
+        'drain_timeout' => (int) (getenv('FLUX_SHUTDOWN_DRAIN_TIMEOUT') === false ? 30 : getenv('FLUX_SHUTDOWN_DRAIN_TIMEOUT')),
+    ],
 ];

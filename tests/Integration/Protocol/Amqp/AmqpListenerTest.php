@@ -116,6 +116,26 @@ final class AmqpListenerTest extends TestCase
         }
     }
 
+    public function testDrainStopsAcceptingNewPlaintextConnections(): void
+    {
+        $listener = new AmqpListener(new ConnectionRegistry(), '127.0.0.1', 0, authenticator: $this->authenticator());
+        $listener->start();
+        $port = $listener->port();
+        $listener->beginDrain();
+
+        try {
+            $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $port), $errorCode, $errorMessage, 0.1);
+            if (is_resource($client)) {
+                fclose($client);
+            }
+
+            self::assertFalse($client);
+            self::assertSame(0, $listener->connectionCount());
+        } finally {
+            $listener->stop();
+        }
+    }
+
     public function testConnectionLimitRejectsAdditionalTlsClients(): void
     {
         $runtimeConnections = new ConnectionRegistry();
@@ -235,6 +255,26 @@ final class AmqpListenerTest extends TestCase
         fclose($client);
     }
 
+    public function testDrainThenStopClosesTlsClients(): void
+    {
+        $listener = new AmqpListener(new ConnectionRegistry(), '127.0.0.1', 0, authenticator: $this->authenticator(), tls: $this->tlsConfig());
+        $listener->start();
+        $client = $this->connectTls($listener);
+        $this->connectAmqp($listener, $client, 60);
+
+        self::assertSame(1, $listener->connectionCount());
+        $listener->beginDrain();
+        $listener->stop();
+
+        for ($attempt = 0; $attempt < 20 && !feof($client); $attempt++) {
+            fread($client, 8192);
+            usleep(1000);
+        }
+
+        self::assertTrue(feof($client));
+        fclose($client);
+    }
+
     public function testIdleConnectionSendsHeartbeatFrame(): void
     {
         $now = 0;
@@ -264,6 +304,36 @@ final class AmqpListenerTest extends TestCase
             self::assertSame(Frame::TYPE_HEARTBEAT, $frame->type);
             self::assertSame(0, $frame->channel);
             self::assertSame('', $frame->payload);
+            fclose($client);
+        } finally {
+            $listener->stop();
+        }
+    }
+
+    public function testDrainingConnectionStillSendsHeartbeatFrame(): void
+    {
+        $now = 0;
+        $listener = new AmqpListener(
+            new ConnectionRegistry(),
+            '127.0.0.1',
+            0,
+            authenticator: $this->authenticator(),
+            heartbeatInterval: 5,
+            clock: static function () use (&$now): int {
+                return $now * 1_000_000_000;
+            }
+        );
+        $listener->start();
+
+        try {
+            $client = $this->connect($listener);
+            $this->connectAmqp($listener, $client, 5);
+            $listener->beginDrain();
+            $now = 5;
+            $frame = $this->readFrame($listener, $client);
+
+            self::assertSame(Frame::TYPE_HEARTBEAT, $frame->type);
+            self::assertSame(0, $frame->channel);
             fclose($client);
         } finally {
             $listener->stop();

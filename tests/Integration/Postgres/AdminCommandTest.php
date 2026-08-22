@@ -261,8 +261,10 @@ SQL)->execute(['message_route_id' => $earlyRoute->id]);
         [$exitCode, $output] = $this->runSimpleCommand(new BrokerStatsCommand($this->context, new AvailableRuntimeDiagnostics()));
 
         self::assertSame(0, $exitCode);
+        self::assertStringContainsString('State:       Draining', $output);
         self::assertStringContainsString('Connections: 3 / 10', $output);
         self::assertStringContainsString('Consumers:   5', $output);
+        self::assertStringContainsString('Unacked:     2', $output);
     }
 
     public function testNewRepositoryReadMethodsAreScopedAndDeterministic(): void
@@ -404,7 +406,7 @@ final readonly class AvailableRuntimeDiagnostics implements RuntimeDiagnostics
 {
     public function stats(): array
     {
-        return ['connections' => 3, 'consumers' => 5, 'limits' => ['max_connections' => 10]];
+        return ['state' => 'draining', 'connections' => 3, 'consumers' => 5, 'unacked' => 2, 'limits' => ['max_connections' => 10]];
     }
 
     public function connections(): array

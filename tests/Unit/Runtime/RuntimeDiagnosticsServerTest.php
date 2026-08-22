@@ -11,6 +11,7 @@ use Flux\Runtime\ConsumerRegistry;
 use Flux\Runtime\RuntimeConnection;
 use Flux\Runtime\RuntimeConsumer;
 use Flux\Runtime\RuntimeDiagnosticsServer;
+use Flux\Runtime\RuntimeState;
 use PHPUnit\Framework\TestCase;
 
 final class RuntimeDiagnosticsServerTest extends TestCase
@@ -106,8 +107,32 @@ final class RuntimeDiagnosticsServerTest extends TestCase
             self::assertTrue($stats['ok']);
             self::assertSame(1, $stats['data']['connections']);
             self::assertSame(0, $stats['data']['consumers']);
+            self::assertSame('unknown', $stats['data']['state']);
+            self::assertSame(0, $stats['data']['unacked']);
             self::assertSame(7, $stats['data']['limits']['max_connections']);
             self::assertSame(11, $stats['data']['limits']['max_queue_depth']);
+        } finally {
+            $server->stop();
+        }
+    }
+
+    public function testStatsCanReportDrainingStateAndUnackedCount(): void
+    {
+        $server = new RuntimeDiagnosticsServer(
+            new ConnectionRegistry(),
+            new ConsumerRegistry(),
+            port: 0,
+            stateProvider: static fn (): RuntimeState => RuntimeState::Draining,
+            unackedProvider: static fn (): int => 2
+        );
+        $server->start();
+
+        try {
+            $stats = $this->request($server, ['command' => 'stats']);
+
+            self::assertTrue($stats['ok']);
+            self::assertSame('draining', $stats['data']['state']);
+            self::assertSame(2, $stats['data']['unacked']);
         } finally {
             $server->stop();
         }

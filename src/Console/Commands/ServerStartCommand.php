@@ -47,6 +47,7 @@ final class ServerStartCommand
     private string $diagnosticsHost;
     private int $diagnosticsPort;
     private ResourceLimits $limits;
+    private int $drainTimeoutSeconds;
 
     /**
      * @param null|callable(Broker, ConnectionRegistry, ConsumerRegistry): BrokerRuntime $runtimeFactory
@@ -67,7 +68,8 @@ final class ServerStartCommand
         ?string $amqpTlsCert = null,
         ?string $amqpTlsKey = null,
         ?string $amqpTlsCa = null,
-        ?ResourceLimits $limits = null
+        ?ResourceLimits $limits = null,
+        int $drainTimeoutSeconds = 30
     ) {
         if (is_callable($amqpHost)) {
             $runtimeFactory = $amqpHost;
@@ -84,6 +86,7 @@ final class ServerStartCommand
             $diagnosticsHost = '127.0.0.1';
             $diagnosticsPort = 5673;
             $limits = null;
+            $drainTimeoutSeconds = 30;
         }
 
         $this->amqpEnabled = $amqpEnabled;
@@ -99,6 +102,10 @@ final class ServerStartCommand
         $this->diagnosticsHost = $diagnosticsHost;
         $this->diagnosticsPort = $diagnosticsPort;
         $this->limits = $limits ?? new ResourceLimits();
+        if ($drainTimeoutSeconds < 0) {
+            throw new \RuntimeException('Shutdown drain timeout must not be negative.');
+        }
+        $this->drainTimeoutSeconds = $drainTimeoutSeconds;
         $this->runtimeFactory = $runtimeFactory;
     }
 
@@ -260,14 +267,26 @@ final class ServerStartCommand
             );
         }
 
-        $components[] = new RuntimeDiagnosticsServer($connections, $consumers, $this->diagnosticsHost, $this->diagnosticsPort, $this->limits);
+        $runtime = null;
+        $components[] = new RuntimeDiagnosticsServer(
+            $connections,
+            $consumers,
+            $this->diagnosticsHost,
+            $this->diagnosticsPort,
+            $this->limits,
+            stateProvider: static fn (): string => $runtime?->state()->value ?? 'starting',
+            unackedProvider: static fn (): int => $runtime?->unackedCount() ?? 0
+        );
 
-        return new BrokerRuntime(
+        $runtime = new BrokerRuntime(
             $broker,
             $connections,
             $consumers,
-            components: $components
+            components: $components,
+            drainTimeoutSeconds: $this->drainTimeoutSeconds
         );
+
+        return $runtime;
     }
 
     /**

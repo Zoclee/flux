@@ -202,6 +202,7 @@ HELP);
             $amqpTlsConfig = $amqpConfig['tls'] ?? [];
             $limits = ResourceLimits::fromArray($config['limits'] ?? []);
             $diagnosticsConfig = $config['diagnostics'] ?? [];
+            $shutdownConfig = $config['shutdown'] ?? [];
         } catch (Throwable $exception) {
             $this->write($output, "Flux Message Broker\n\n");
             $this->write($output, "Status:   stopped\n\n");
@@ -225,7 +226,8 @@ HELP);
             amqpTlsPort: (int) ($amqpTlsConfig['port'] ?? 5671),
             amqpTlsCert: isset($amqpTlsConfig['cert']) ? (string) $amqpTlsConfig['cert'] : null,
             amqpTlsKey: isset($amqpTlsConfig['key']) ? (string) $amqpTlsConfig['key'] : null,
-            amqpTlsCa: isset($amqpTlsConfig['ca']) && $amqpTlsConfig['ca'] !== '' ? (string) $amqpTlsConfig['ca'] : null
+            amqpTlsCa: isset($amqpTlsConfig['ca']) && $amqpTlsConfig['ca'] !== '' ? (string) $amqpTlsConfig['ca'] : null,
+            drainTimeoutSeconds: (int) ($shutdownConfig['drain_timeout'] ?? 30)
         ))->run($output);
     }
 

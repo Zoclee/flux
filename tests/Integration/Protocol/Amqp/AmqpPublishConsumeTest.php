@@ -426,6 +426,151 @@ final class AmqpPublishConsumeTest extends TestCase
         }
     }
 
+    public function testExistingAckSucceedsDuringDrainAndCompletesInflightWork(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['held']);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $delivery = $this->readMethodFrame($listener, $client);
+            $deliveryTag = $this->deliveryTagFromDeliver($delivery);
+            $this->readFrame($listener, $client);
+            $this->readFrame($listener, $client);
+
+            $listener->beginDrain();
+            self::assertSame(1, $listener->inFlightCount());
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong($deliveryTag) . "\x00");
+            $listener->tick();
+
+            self::assertSame(0, $listener->inFlightCount());
+            self::assertSame(DeliveryState::Acknowledged, $this->singleDelivery('orders')->state);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testNewPublishConsumerAndGetAreRefusedDuringDrain(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(3, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(4, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $listener->beginDrain();
+
+            $this->sendMethod($client, 2, 60, 40, $this->basicPublish('', 'orders'));
+            $publishClose = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $publishClose->method());
+            self::assertSame(320, $this->replyCode($publishClose));
+
+            $this->sendMethod($client, 3, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            $consumeClose = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $consumeClose->method());
+            self::assertSame(320, $this->replyCode($consumeClose));
+
+            $this->sendMethod($client, 4, 60, 70, $this->basicGet('orders'));
+            $getClose = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $getClose->method());
+            self::assertSame(320, $this->replyCode($getClose));
+            self::assertSame(1, $listener->connectionCount());
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testExistingConsumersDoNotReserveNewDeliveriesDuringDrain(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            $listener->beginDrain();
+            $this->broker()->publishToDefaultExchange('/', 'orders', 'pending-after-drain');
+            $this->assertNoFrame($listener, $client);
+
+            self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testShutdownCleanupReleasesRemainingUnackedDeliveryAfterDrain(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['held']);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->readMethodFrame($listener, $client);
+            $this->readFrame($listener, $client);
+            $this->readFrame($listener, $client);
+
+            $listener->beginDrain();
+            $listener->stop();
+
+            self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
+        } finally {
+            if (is_resource($client)) {
+                fclose($client);
+            }
+            $listener->stop();
+        }
+    }
+
+    public function testReleasedDeliveryCanBeConsumedAfterRestart(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['restart']);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->readMethodFrame($listener, $client);
+            $this->readFrame($listener, $client);
+            $this->readFrame($listener, $client);
+            $listener->beginDrain();
+            $listener->stop();
+            fclose($client);
+        } finally {
+            $listener->stop();
+        }
+
+        [$nextListener, $nextClient] = $this->startedListener();
+        try {
+            $this->connectAndOpenChannel($nextListener, $nextClient, 1);
+            $this->sendMethod($nextClient, 1, 60, 20, $this->basicConsume('orders', 'consumer-b'));
+            self::assertSame([60, 21], $this->readMethod($nextListener, $nextClient));
+
+            self::assertSame('restart', $this->readDeliveryBody($nextListener, $nextClient));
+        } finally {
+            fclose($nextClient);
+            $nextListener->stop();
+        }
+    }
+
     public function testDisconnectReleasesUnackedDeliveries(): void
     {
         [$listener, $client] = $this->startedListener();

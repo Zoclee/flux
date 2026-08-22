@@ -11,9 +11,10 @@ use Flux\Broker\ResourceLimits;
 use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
 use Flux\Runtime\RuntimeComponent;
+use Flux\Runtime\RuntimeDrainingComponent;
 use RuntimeException;
 
-final class AmqpListener implements RuntimeComponent
+final class AmqpListener implements RuntimeDrainingComponent
 {
     /**
      * @var resource|null
@@ -29,6 +30,8 @@ final class AmqpListener implements RuntimeComponent
      * @var array<string, resource>
      */
     private array $pendingTlsClients = [];
+
+    private bool $draining = false;
 
     public function __construct(
         private readonly ConnectionRegistry $runtimeConnections,
@@ -87,28 +90,26 @@ final class AmqpListener implements RuntimeComponent
 
     public function tick(): void
     {
-        if ($this->server === null) {
-            return;
-        }
+        if ($this->server !== null && !$this->draining) {
+            while (($client = @stream_socket_accept($this->server, 0)) !== false) {
+                stream_set_blocking($client, false);
 
-        while (($client = @stream_socket_accept($this->server, 0)) !== false) {
-            stream_set_blocking($client, false);
+                if (!$this->hasConnectionCapacity()) {
+                    fclose($client);
+                    continue;
+                }
 
-            if (!$this->hasConnectionCapacity()) {
-                fclose($client);
-                continue;
+                if ($this->tls !== null) {
+                    stream_context_set_options($client, ['ssl' => $this->tls->streamContextOptions()]);
+                    $this->pendingTlsClients[(string) (int) $client] = $client;
+                    continue;
+                }
+
+                $this->addConnection($client);
             }
 
-            if ($this->tls !== null) {
-                stream_context_set_options($client, ['ssl' => $this->tls->streamContextOptions()]);
-                $this->pendingTlsClients[(string) (int) $client] = $client;
-                continue;
-            }
-
-            $this->addConnection($client);
+            $this->completePendingTlsHandshakes();
         }
-
-        $this->completePendingTlsHandshakes();
 
         foreach ($this->connections as $key => $connection) {
             $connection->tick();
@@ -139,6 +140,44 @@ final class AmqpListener implements RuntimeComponent
         }
 
         $this->server = null;
+        $this->draining = false;
+    }
+
+    public function beginDrain(): void
+    {
+        if ($this->draining) {
+            return;
+        }
+
+        $this->draining = true;
+
+        if (is_resource($this->server)) {
+            fclose($this->server);
+        }
+
+        $this->server = null;
+
+        foreach ($this->pendingTlsClients as $client) {
+            if (is_resource($client)) {
+                fclose($client);
+            }
+        }
+
+        $this->pendingTlsClients = [];
+
+        foreach ($this->connections as $connection) {
+            $connection->beginDrain();
+        }
+    }
+
+    public function inFlightCount(): int
+    {
+        $count = 0;
+        foreach ($this->connections as $connection) {
+            $count += $connection->unacknowledgedDeliveryCount();
+        }
+
+        return $count;
     }
 
     public function host(): string
@@ -203,6 +242,7 @@ final class AmqpListener implements RuntimeComponent
             $this->maxMessageSize,
             heartbeatInterval: $this->heartbeatInterval,
             limits: $this->limits,
+            draining: $this->draining,
             clock: $this->clock
         );
     }

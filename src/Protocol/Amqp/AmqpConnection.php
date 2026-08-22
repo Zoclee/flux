@@ -109,6 +109,7 @@ final class AmqpConnection
         private readonly int $maxMessageSize = 10485760,
         private readonly int $heartbeatInterval = 60,
         private readonly ?ResourceLimits $limits = null,
+        private bool $draining = false,
         ?callable $clock = null
     ) {
         if ($this->heartbeatInterval < 0 || $this->heartbeatInterval > 65535) {
@@ -234,6 +235,21 @@ final class AmqpConnection
         $this->nextDeliveryTags = [];
         error_log(sprintf('AMQP connection closed: %s', $this->runtimeConnection->id));
         $this->state = AmqpConnectionState::Closed;
+    }
+
+    public function beginDrain(): void
+    {
+        $this->draining = true;
+    }
+
+    public function unacknowledgedDeliveryCount(): int
+    {
+        $count = 0;
+        foreach ($this->unackedDeliveries as $deliveries) {
+            $count += count($deliveries);
+        }
+
+        return $count;
     }
 
     public function state(): AmqpConnectionState
@@ -704,6 +720,11 @@ final class AmqpConnection
 
     private function handleBasicPublish(Frame $frame): void
     {
+        if ($this->draining) {
+            $this->sendDrainChannelError($frame->channel, 60, 40);
+            return;
+        }
+
         if (isset($this->pendingPublishMethods[$frame->channel]) || isset($this->pendingPublishes[$frame->channel])) {
             throw new ProtocolException('AMQP publish content sequence is already in progress.');
         }
@@ -730,6 +751,11 @@ final class AmqpConnection
 
     private function handleBasicConsume(Frame $frame): void
     {
+        if ($this->draining) {
+            $this->sendDrainChannelError($frame->channel, 60, 20);
+            return;
+        }
+
         $reader = new AmqpMethodReader(substr($frame->payload, 4));
         $reader->readShort();
         $queue = $reader->readShortString();
@@ -796,6 +822,11 @@ final class AmqpConnection
 
     private function handleBasicGet(Frame $frame): void
     {
+        if ($this->draining) {
+            $this->sendDrainChannelError($frame->channel, 60, 70);
+            return;
+        }
+
         $reader = new AmqpMethodReader(substr($frame->payload, 4));
         $reader->readShort();
         $queue = $reader->readShortString();
@@ -1122,6 +1153,10 @@ final class AmqpConnection
 
     private function deliverToConsumers(): void
     {
+        if ($this->draining) {
+            return;
+        }
+
         foreach ($this->activeConsumers as $consumerTag => $state) {
             $channel = $state['channel'];
             if (!isset($this->channels[$channel])) {
@@ -1410,6 +1445,11 @@ final class AmqpConnection
         );
 
         return false;
+    }
+
+    private function sendDrainChannelError(int $channel, int $classId, int $methodId): void
+    {
+        $this->sendChannelError($channel, 320, 'CONNECTION_FORCED - server is draining', $classId, $methodId);
     }
 
     private function openedVirtualHost(): string

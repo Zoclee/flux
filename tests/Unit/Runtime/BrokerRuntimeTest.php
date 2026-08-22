@@ -19,6 +19,7 @@ use Flux\Runtime\ConsumerRegistry;
 use Flux\Runtime\RuntimeConnection;
 use Flux\Runtime\RuntimeConsumer;
 use Flux\Runtime\RuntimeDiagnosticsServer;
+use Flux\Runtime\RuntimeDrainingComponent;
 use Flux\Runtime\RuntimeState;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
@@ -140,6 +141,97 @@ final class BrokerRuntimeTest extends TestCase
         self::assertFalse($client);
     }
 
+    public function testShutdownTransitionsThroughDrainingAndCompletesWhenInflightSettles(): void
+    {
+        $events = [];
+        $component = new RecordingDrainingComponent($events, 1);
+        $runtime = new BrokerRuntime(
+            $this->broker(),
+            new ConnectionRegistry(),
+            new ConsumerRegistry(),
+            0,
+            static function (): void {
+            },
+            [$component],
+            drainTimeoutSeconds: 30,
+            clock: static fn (): int => 0
+        );
+
+        $runtime->run(maxIterations: 1);
+
+        self::assertSame(RuntimeState::Stopped, $runtime->state());
+        self::assertSame(['start', 'tick', 'begin-drain', 'tick', 'stop'], $events);
+    }
+
+    public function testDrainTimeoutForcesFinalCleanup(): void
+    {
+        $now = 0;
+        $events = [];
+        $component = new RecordingDrainingComponent($events, 1, settleOnTick: false);
+        $runtime = new BrokerRuntime(
+            $this->broker(),
+            new ConnectionRegistry(),
+            new ConsumerRegistry(),
+            0,
+            static function () use (&$now): void {
+                $now += 2_000_000_000;
+            },
+            [$component],
+            drainTimeoutSeconds: 1,
+            clock: static function () use (&$now): int {
+                return $now;
+            }
+        );
+
+        $runtime->run(maxIterations: 1);
+
+        self::assertSame(RuntimeState::Stopped, $runtime->state());
+        self::assertContains('begin-drain', $events);
+        self::assertSame(1, $component->inFlightCount());
+    }
+
+    public function testRepeatedShutdownRequestsAndStopAreIdempotent(): void
+    {
+        $events = [];
+        $runtime = new BrokerRuntime(
+            $this->broker(),
+            new ConnectionRegistry(),
+            new ConsumerRegistry(),
+            0,
+            static function (): void {
+            },
+            [new RecordingRuntimeComponent($events)]
+        );
+
+        $runtime->requestShutdown();
+        $runtime->requestShutdown();
+        $runtime->run(maxIterations: 0);
+        $runtime->stop();
+
+        self::assertSame(RuntimeState::Stopped, $runtime->state());
+        self::assertSame(['start', 'stop'], $events);
+    }
+
+    public function testImmediateShutdownWithZeroDrainTimeout(): void
+    {
+        $events = [];
+        $runtime = new BrokerRuntime(
+            $this->broker(),
+            new ConnectionRegistry(),
+            new ConsumerRegistry(),
+            0,
+            static function (): void {
+            },
+            [new RecordingDrainingComponent($events, 1, settleOnTick: false)],
+            drainTimeoutSeconds: 0
+        );
+
+        $runtime->run(maxIterations: 1);
+
+        self::assertSame(RuntimeState::Stopped, $runtime->state());
+        self::assertSame(['start', 'tick', 'begin-drain', 'stop'], $events);
+    }
+
     private function runtime(?callable $sleep = null): BrokerRuntime
     {
         return new BrokerRuntime(
@@ -194,5 +286,49 @@ final class RecordingRuntimeComponent implements \Flux\Runtime\RuntimeComponent
     public function stop(): void
     {
         $this->events[] = 'stop';
+    }
+}
+
+final class RecordingDrainingComponent implements RuntimeDrainingComponent
+{
+    /**
+     * @var list<string>
+     */
+    private array $events;
+
+    public function __construct(
+        array &$events,
+        private int $inFlight,
+        private readonly bool $settleOnTick = true
+    ) {
+        $this->events = &$events;
+    }
+
+    public function start(): void
+    {
+        $this->events[] = 'start';
+    }
+
+    public function tick(): void
+    {
+        $this->events[] = 'tick';
+        if ($this->settleOnTick && in_array('begin-drain', $this->events, true)) {
+            $this->inFlight = 0;
+        }
+    }
+
+    public function stop(): void
+    {
+        $this->events[] = 'stop';
+    }
+
+    public function beginDrain(): void
+    {
+        $this->events[] = 'begin-drain';
+    }
+
+    public function inFlightCount(): int
+    {
+        return $this->inFlight;
     }
 }

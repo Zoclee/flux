@@ -33,7 +33,9 @@ final class RuntimeDiagnosticsServer implements RuntimeComponent
         private readonly ConsumerRegistry $consumers,
         private string $host = '127.0.0.1',
         private int $port = 5673,
-        private readonly ?ResourceLimits $limits = null
+        private readonly ?ResourceLimits $limits = null,
+        private readonly mixed $stateProvider = null,
+        private readonly mixed $unackedProvider = null
     ) {
         if ($this->host === '') {
             throw new RuntimeException('Runtime diagnostics host must not be empty.');
@@ -144,8 +146,10 @@ final class RuntimeDiagnosticsServer implements RuntimeComponent
 
         return match ($request['command']) {
             'stats' => ['ok' => true, 'data' => [
+                'state' => $this->runtimeState(),
                 'connections' => $this->connections->count(),
                 'consumers' => $this->consumers->count(),
+                'unacked' => $this->unackedCount(),
                 'limits' => $this->limitsData(),
             ]],
             'connections' => ['ok' => true, 'data' => array_map(
@@ -189,6 +193,26 @@ final class RuntimeDiagnosticsServer implements RuntimeComponent
             'max_queues_per_virtual_host' => $limits->maxQueuesPerVirtualHost,
             'max_queue_depth' => $limits->maxQueueDepth,
         ];
+    }
+
+    private function runtimeState(): string
+    {
+        if (is_callable($this->stateProvider)) {
+            $state = ($this->stateProvider)();
+
+            return $state instanceof RuntimeState ? $state->value : (string) $state;
+        }
+
+        return 'unknown';
+    }
+
+    private function unackedCount(): int
+    {
+        if (is_callable($this->unackedProvider)) {
+            return (int) ($this->unackedProvider)();
+        }
+
+        return 0;
     }
 
     /**
