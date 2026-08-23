@@ -1106,6 +1106,174 @@ final class AmqpPublishConsumeTest extends TestCase
         }
     }
 
+    public function testQueueDeleteFromAnotherChannelSendsServerBasicCancelAndKeepsConnectionUsable(): void
+    {
+        $consumers = new ConsumerRegistry();
+        [$listener, $client] = $this->startedListener(consumers: $consumers);
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(3, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            $this->publishBody($listener, $client, 2, '', 'orders', 'done');
+            $deliver = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 60], $deliver->method());
+            self::assertSame(1, $deliver->channel);
+            $deliveryTag = $this->deliveryTagFromDeliver($deliver);
+            $this->readFrame($listener, $client);
+            self::assertSame('done', $this->readFrame($listener, $client)->payload);
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong($deliveryTag) . "\x00");
+            $listener->tick();
+
+            $this->sendMethod($client, 2, 50, 40, $this->queueDelete('orders'));
+            $cancel = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 30], $cancel->method());
+            self::assertSame(1, $cancel->channel);
+            self::assertSame('consumer-a', $this->consumerTagFromBasicCancel($cancel));
+            $deleteOk = $this->readMethodFrame($listener, $client);
+            self::assertSame([50, 41], $deleteOk->method());
+            self::assertSame(2, $deleteOk->channel);
+            self::assertSame(0, $consumers->count());
+            $this->assertNoFrame($listener, $client);
+
+            $this->sendMethod($client, 3, 50, 10, $this->queueDeclare('orders', passive: true));
+            $close = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(3, $close->channel);
+            self::assertSame(404, $this->replyCode($close));
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders.after.consumer'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 2, 50, 10, $this->queueDeclare('orders.after.control'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            self::assertSame(1, $listener->connectionCount());
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertFalse($this->queueExists('orders'));
+    }
+
+    public function testQueueDeleteSendsOneServerBasicCancelToEachAffectedConsumerOnly(): void
+    {
+        $consumers = new ConsumerRegistry();
+        [$listener, $client] = $this->startedListener(consumers: $consumers);
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            for ($channel = 2; $channel <= 5; $channel++) {
+                fwrite($client, $codec->encode(Frame::methodFrame($channel, 20, 10, "\x00")));
+                self::assertSame([20, 11], $this->readMethod($listener, $client));
+            }
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('invoices'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 2, 60, 20, $this->basicConsume('orders', 'consumer-b'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 3, 60, 20, $this->basicConsume('orders', 'consumer-c'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 4, 60, 20, $this->basicConsume('invoices', 'consumer-other'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertSame(4, $consumers->count());
+
+            $this->sendMethod($client, 5, 50, 40, $this->queueDelete('orders'));
+
+            $cancellations = [];
+            for ($i = 0; $i < 3; $i++) {
+                $cancel = $this->readMethodFrame($listener, $client);
+                self::assertSame([60, 30], $cancel->method());
+                $cancellations[$this->consumerTagFromBasicCancel($cancel)] = $cancel->channel;
+            }
+
+            self::assertSame(
+                ['consumer-a' => 1, 'consumer-b' => 2, 'consumer-c' => 3],
+                $cancellations
+            );
+            $deleteOk = $this->readMethodFrame($listener, $client);
+            self::assertSame([50, 41], $deleteOk->method());
+            self::assertSame(5, $deleteOk->channel);
+            self::assertSame(1, $consumers->count());
+            $this->assertNoFrame($listener, $client);
+
+            $this->publishBody($listener, $client, 5, '', 'invoices', 'still-active');
+            $delivery = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 60], $delivery->method());
+            self::assertSame(4, $delivery->channel);
+            self::assertSame('consumer-other', $this->consumerTagFromDeliver($delivery));
+            $this->readFrame($listener, $client);
+            self::assertSame('still-active', $this->readFrame($listener, $client)->payload);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testQueueDeleteWithUnackedConsumerDeliveryCancelsConsumerAndRuntimeStaysHealthy(): void
+    {
+        $consumers = new ConsumerRegistry();
+        [$listener, $client] = $this->startedListener(consumers: $consumers);
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(3, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['held']);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $deliver = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 60], $deliver->method());
+            self::assertSame(1, $deliver->channel);
+            $this->readFrame($listener, $client);
+            self::assertSame('held', $this->readFrame($listener, $client)->payload);
+            self::assertSame(DeliveryState::Reserved, $this->singleDelivery('orders')->state);
+
+            $this->sendMethod($client, 2, 50, 40, $this->queueDelete('orders'));
+            $cancel = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 30], $cancel->method());
+            self::assertSame(1, $cancel->channel);
+            self::assertSame('consumer-a', $this->consumerTagFromBasicCancel($cancel));
+            $deleteOk = $this->readMethodFrame($listener, $client);
+            self::assertSame([50, 41], $deleteOk->method());
+            self::assertSame(2, $deleteOk->channel);
+            self::assertSame(0, $consumers->count());
+            self::assertFalse($this->queueExists('orders'));
+            self::assertSame(1, $listener->connectionCount());
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders.after.unacked.consumer'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 2, 50, 10, $this->queueDeclare('orders.after.unacked.control'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 3, 50, 10, $this->queueDeclare('orders', passive: true));
+            $close = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(3, $close->channel);
+            self::assertSame(404, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testExistingAckSucceedsDuringDrainAndCompletesInflightWork(): void
     {
         [$listener, $client] = $this->startedListener();
@@ -2870,6 +3038,13 @@ final class AmqpPublishConsumeTest extends TestCase
     }
 
     private function consumerTagFromBasicCancelOk(Frame $frame): string
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+
+        return $reader->readShortString();
+    }
+
+    private function consumerTagFromBasicCancel(Frame $frame): string
     {
         $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
 

@@ -52,6 +52,11 @@ final class AmqpConnection
     private $clock;
 
     /**
+     * @var null|callable(string, string): void
+     */
+    private $queueDeletionNotifier;
+
+    /**
      * @var array<int, true>
      */
     private array $channels = [];
@@ -111,7 +116,8 @@ final class AmqpConnection
         private readonly int $heartbeatInterval = 60,
         private readonly ?ResourceLimits $limits = null,
         private bool $draining = false,
-        ?callable $clock = null
+        ?callable $clock = null,
+        ?callable $queueDeletionNotifier = null
     ) {
         if ($this->heartbeatInterval < 0 || $this->heartbeatInterval > 65535) {
             throw new RuntimeException('AMQP heartbeat interval must fit in an unsigned short.');
@@ -121,6 +127,7 @@ final class AmqpConnection
         $this->codec = new FrameCodec($this->maxFrameSize);
         $this->consumers = $consumers ?? new ConsumerRegistry();
         $this->clock = $clock ?? static fn (): int => hrtime(true);
+        $this->queueDeletionNotifier = $queueDeletionNotifier;
         $this->lastReceivedAt = $this->now();
         $this->lastSentAt = $this->lastReceivedAt;
         $this->negotiatedHeartbeat = $this->heartbeatInterval;
@@ -262,6 +269,15 @@ final class AmqpConnection
         }
 
         return $count;
+    }
+
+    public function cancelConsumersForDeletedQueue(string $virtualHost, string $queue): int
+    {
+        if ($this->state === AmqpConnectionState::Closed) {
+            return 0;
+        }
+
+        return $this->cancelLocalConsumersForDeletedQueue($virtualHost, $queue);
     }
 
     public function state(): AmqpConnectionState
@@ -714,13 +730,14 @@ final class AmqpConnection
             return;
         }
 
-        if ($ifUnused && $this->queueHasActiveConsumer($queue)) {
+        $virtualHost = $this->openedVirtualHost();
+        if ($ifUnused && $this->consumers->countByDestination($virtualHost, $queue) > 0) {
             throw new TopologyException(sprintf('Queue "%s" is in use.', $queue), TopologyException::PRECONDITION_FAILED);
         }
 
-        $messageCount = $this->broker()->deleteQueue($this->openedVirtualHost(), $queue, $ifEmpty, $this->runtimeConnection->id);
-        $this->removeConsumersForQueue($queue);
-        $this->clearUnackedForQueue($queue);
+        $this->broker()->assertQueueDeletable($virtualHost, $queue, $ifEmpty, $this->runtimeConnection->id);
+        $this->notifyQueueDeleted($virtualHost, $queue);
+        $messageCount = $this->broker()->deleteQueue($virtualHost, $queue, $ifEmpty, $this->runtimeConnection->id);
 
         if (!$noWait) {
             $this->writeFrame(Frame::methodFrame($frame->channel, 50, 41, pack('N', $messageCount)));
@@ -1480,6 +1497,7 @@ final class AmqpConnection
                 return;
             }
 
+            $this->notifyQueueDeleted($virtualHost, $queue);
             $this->broker()->deleteQueue($virtualHost, $queue, connectionId: $this->runtimeConnection->id);
         } catch (TopologyException $exception) {
             if ($exception->reason !== TopologyException::NOT_FOUND) {
@@ -1488,13 +1506,41 @@ final class AmqpConnection
         }
     }
 
-    private function removeConsumersForQueue(string $queue): void
+    private function notifyQueueDeleted(string $virtualHost, string $queue): void
     {
-        foreach (array_keys($this->activeConsumers) as $consumerTag) {
-            if (($this->activeConsumers[$consumerTag]['queue'] ?? null) === $queue) {
-                $this->removeConsumer($consumerTag);
-            }
+        if ($this->queueDeletionNotifier !== null) {
+            ($this->queueDeletionNotifier)($virtualHost, $queue);
+            return;
         }
+
+        $this->cancelLocalConsumersForDeletedQueue($virtualHost, $queue);
+    }
+
+    private function cancelLocalConsumersForDeletedQueue(string $virtualHost, string $queue): int
+    {
+        $cancelled = 0;
+
+        foreach (array_keys($this->activeConsumers) as $consumerTag) {
+            $state = $this->activeConsumers[$consumerTag] ?? null;
+            if ($state === null) {
+                continue;
+            }
+
+            if ($state['consumer']->virtualHost !== $virtualHost || $state['queue'] !== $queue) {
+                continue;
+            }
+
+            $this->sendServerBasicCancel($state['channel'], $consumerTag);
+            $this->cancelConsumer($consumerTag, deleteAutoDeleteQueue: false);
+            $cancelled++;
+        }
+
+        return $cancelled;
+    }
+
+    private function sendServerBasicCancel(int $channel, string $consumerTag): void
+    {
+        $this->writeFrame(Frame::methodFrame($channel, 60, 30, $this->shortString($consumerTag) . "\x00"));
     }
 
     private function clearUnackedForQueue(string $queue): void
@@ -1596,17 +1642,6 @@ final class AmqpConnection
         }
 
         return $count;
-    }
-
-    private function queueHasActiveConsumer(string $queue): bool
-    {
-        foreach ($this->activeConsumers as $state) {
-            if ($state['queue'] === $queue) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private function outboundBodyChunkSize(): int

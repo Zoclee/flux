@@ -563,16 +563,22 @@ final readonly class Broker
 
     public function deleteQueue(string $virtualHostName, string $queue, bool $ifEmpty = false, ?string $connectionId = null): int
     {
+        $this->assertQueueDeletable($virtualHostName, $queue, $ifEmpty, $connectionId);
         $destination = $this->queueDestination($virtualHostName, $queue, $connectionId);
-
-        if ($ifEmpty && $this->deliveries->countOutstandingByDestination($destination->id) > 0) {
-            throw new TopologyException(sprintf('Queue "%s" is not empty.', $queue), TopologyException::PRECONDITION_FAILED);
-        }
 
         $count = $this->destinations->deleteQueueGraph($destination->id);
         $this->exclusiveQueues()->release($virtualHostName, $destination->name);
 
         return $count;
+    }
+
+    public function assertQueueDeletable(string $virtualHostName, string $queue, bool $ifEmpty = false, ?string $connectionId = null): void
+    {
+        $destination = $this->queueDestination($virtualHostName, $queue, $connectionId);
+
+        if ($ifEmpty && $this->deliveries->countOutstandingByDestination($destination->id) > 0) {
+            throw new TopologyException(sprintf('Queue "%s" is not empty.', $queue), TopologyException::PRECONDITION_FAILED);
+        }
     }
 
     public function unbindQueue(

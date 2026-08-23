@@ -249,8 +249,16 @@ final class AmqpListener implements RuntimeDrainingComponent
             heartbeatInterval: $this->heartbeatInterval,
             limits: $this->limits,
             draining: $this->draining,
-            clock: $this->clock
+            clock: $this->clock,
+            queueDeletionNotifier: $this->cancelConsumersForDeletedQueue(...)
         );
+    }
+
+    private function cancelConsumersForDeletedQueue(string $virtualHost, string $queue): void
+    {
+        foreach ($this->connections as $connection) {
+            $connection->cancelConsumersForDeletedQueue($virtualHost, $queue);
+        }
     }
 
     private function hasConnectionCapacity(): bool
