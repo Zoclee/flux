@@ -1803,6 +1803,243 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
     }
 
+    public function testExclusiveConsumerEndToEndRejectsConflictsAndReleasesOnCancel(): void
+    {
+        $consumers = new ConsumerRegistry();
+        [$listener, $client] = $this->startedListener(consumers: $consumers);
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(3, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one']);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'exclusive-a', exclusive: true));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertSame(1, $consumers->count());
+            self::assertTrue($consumers->hasExclusiveConsumer('/', 'orders'));
+
+            [$firstTag, $firstBody] = $this->readDelivery($listener, $client);
+            self::assertSame('one', $firstBody);
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong($firstTag) . "\x00");
+            $listener->tick();
+
+            $this->sendMethod($client, 2, 60, 20, $this->basicConsume('orders', 'normal-b'));
+            $normalClose = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $normalClose->method());
+            self::assertSame(2, $normalClose->channel);
+            self::assertSame(403, $this->replyCode($normalClose));
+            $this->sendMethod($client, 2, 20, 41);
+
+            $this->sendMethod($client, 3, 60, 20, $this->basicConsume('orders', 'exclusive-b', exclusive: true));
+            $exclusiveClose = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $exclusiveClose->method());
+            self::assertSame(3, $exclusiveClose->channel);
+            self::assertSame(403, $this->replyCode($exclusiveClose));
+            $this->sendMethod($client, 3, 20, 41);
+            self::assertSame(1, $listener->connectionCount());
+            self::assertSame(1, $consumers->count());
+
+            $this->publishBody($listener, $client, 1, '', 'orders', 'two');
+            [$secondTag, $secondBody] = $this->readDelivery($listener, $client);
+            self::assertSame('two', $secondBody);
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong($secondTag) . "\x00");
+            $listener->tick();
+
+            $this->sendMethod($client, 1, 60, 30, $this->basicCancel('exclusive-a'));
+            self::assertSame([60, 31], $this->readMethod($listener, $client));
+            self::assertSame(0, $consumers->count());
+            self::assertFalse($consumers->hasExclusiveConsumer('/', 'orders'));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(4, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            $this->publishBody($listener, $client, 1, '', 'orders', 'three');
+            $this->sendMethod($client, 4, 60, 20, $this->basicConsume('orders', 'normal-c'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $replacementDelivery = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 60], $replacementDelivery->method());
+            self::assertSame(4, $replacementDelivery->channel);
+            self::assertSame('normal-c', $this->consumerTagFromDeliver($replacementDelivery));
+            $replacementTag = $this->deliveryTagFromDeliver($replacementDelivery);
+            $this->readFrame($listener, $client);
+            self::assertSame('three', $this->readFrame($listener, $client)->payload);
+            $this->sendMethod($client, 4, 60, 80, $this->packLongLong($replacementTag) . "\x00");
+            $listener->tick();
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(
+            [DeliveryState::Acknowledged, DeliveryState::Acknowledged, DeliveryState::Acknowledged],
+            $this->deliveryStates('orders')
+        );
+    }
+
+    public function testExclusiveConsumerIsRejectedWhenNormalConsumerAlreadyExistsAndOtherQueuesAreUnaffected(): void
+    {
+        $consumers = new ConsumerRegistry();
+        [$listener, $client] = $this->startedListener(consumers: $consumers);
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            fwrite($client, $codec->encode(Frame::methodFrame(3, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('invoices'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'normal-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 2, 60, 20, $this->basicConsume('orders', 'exclusive-b', exclusive: true));
+            $close = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(2, $close->channel);
+            self::assertSame(403, $this->replyCode($close));
+            self::assertSame(1, $listener->connectionCount());
+
+            $this->publishBody($listener, $client, 1, '', 'invoices', 'unrelated');
+            $this->sendMethod($client, 3, 60, 20, $this->basicConsume('invoices', 'exclusive-other', exclusive: true));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $delivery = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 60], $delivery->method());
+            self::assertSame(3, $delivery->channel);
+            $this->readFrame($listener, $client);
+            self::assertSame('unrelated', $this->readFrame($listener, $client)->payload);
+            self::assertSame(2, $consumers->count());
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testChannelCloseReleasesExclusiveConsumer(): void
+    {
+        $consumers = new ConsumerRegistry();
+        [$listener, $client] = $this->startedListener(consumers: $consumers);
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'exclusive-a', exclusive: true));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 20, 40, pack('n', 200) . $this->shortString('Goodbye') . pack('nn', 0, 0))));
+            self::assertSame([20, 41], $this->readMethod($listener, $client));
+            self::assertSame(0, $consumers->count());
+
+            fwrite($client, $codec->encode(Frame::methodFrame(2, 20, 10, "\x00")));
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 2, 60, 20, $this->basicConsume('orders', 'normal-b'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testDisconnectReleasesExclusiveConsumer(): void
+    {
+        $consumers = new ConsumerRegistry();
+        [$listener, $client] = $this->startedListener(consumers: $consumers);
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'exclusive-a', exclusive: true));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertSame(1, $consumers->count());
+
+            fclose($client);
+            $listener->tick();
+            self::assertSame(0, $consumers->count());
+
+            $replacement = $this->connectClient($listener, 1);
+            $this->sendMethod($replacement, 1, 60, 20, $this->basicConsume('orders', 'normal-b'));
+            self::assertSame([60, 21], $this->readMethod($listener, $replacement));
+            fclose($replacement);
+        } finally {
+            if (is_resource($client)) {
+                fclose($client);
+            }
+            $listener->stop();
+        }
+    }
+
+    public function testHeartbeatTimeoutReleasesExclusiveConsumer(): void
+    {
+        $now = 0;
+        $consumers = new ConsumerRegistry();
+        $listener = new AmqpListener(
+            new ConnectionRegistry(),
+            '127.0.0.1',
+            0,
+            broker: $this->broker(),
+            authenticator: $this->authenticator(),
+            authorizer: $this->authorizer(),
+            consumers: $consumers,
+            heartbeatInterval: 1,
+            clock: static function () use (&$now): int {
+                return $now * 1_000_000_000;
+            }
+        );
+        $listener->start();
+        $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $listener->port()), $errorCode, $errorMessage, 1.0);
+        self::assertIsResource($client, sprintf('Could not connect to AMQP listener: %s', $errorMessage));
+        stream_set_blocking($client, false);
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'exclusive-a', exclusive: true));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertSame(1, $consumers->count());
+
+            $now = 2;
+            $listener->tick();
+            self::assertSame(0, $consumers->count());
+
+            $replacement = $this->connectClient($listener, 1);
+            $this->sendMethod($replacement, 1, 60, 20, $this->basicConsume('orders', 'normal-b'));
+            self::assertSame([60, 21], $this->readMethod($listener, $replacement));
+            fclose($replacement);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testNoLocalConsumerRemainsSeparatelyUnsupported(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a', noLocal: true));
+            $close = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(540, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testBasicQosReturnsQosOk(): void
     {
         [$listener, $client] = $this->startedListener();
@@ -3519,9 +3756,30 @@ final class AmqpPublishConsumeTest extends TestCase
         return pack('n', 0) . $this->shortString($exchange) . $this->shortString($routingKey) . chr($mandatory ? 1 : 0);
     }
 
-    private function basicConsume(string $queue, string $consumerTag): string
+    private function basicConsume(
+        string $queue,
+        string $consumerTag,
+        bool $noLocal = false,
+        bool $noAck = false,
+        bool $exclusive = false,
+        bool $noWait = false
+    ): string
     {
-        return pack('n', 0) . $this->shortString($queue) . $this->shortString($consumerTag) . "\x00" . pack('N', 0);
+        $bits = 0;
+        if ($noLocal) {
+            $bits |= 0b00000001;
+        }
+        if ($noAck) {
+            $bits |= 0b00000010;
+        }
+        if ($exclusive) {
+            $bits |= 0b00000100;
+        }
+        if ($noWait) {
+            $bits |= 0b00001000;
+        }
+
+        return pack('n', 0) . $this->shortString($queue) . $this->shortString($consumerTag) . chr($bits) . pack('N', 0);
     }
 
     private function basicCancel(string $consumerTag, bool $noWait = false): string

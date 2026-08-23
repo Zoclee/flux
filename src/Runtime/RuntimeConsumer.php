@@ -20,6 +20,7 @@ final readonly class RuntimeConsumer
         public string $destination,
         public string $subscription,
         public DateTimeImmutable $createdAt,
+        public bool $exclusive = false,
         public array $metadata = []
     ) {
         Uuid::assertValid($this->id, 'Consumer ID');
@@ -50,6 +51,7 @@ final readonly class RuntimeConsumer
         string $virtualHost,
         string $destination,
         string $subscription,
+        bool $exclusive = false,
         array $metadata = []
     ): self {
         return new self(
@@ -59,6 +61,7 @@ final readonly class RuntimeConsumer
             $destination,
             $subscription,
             new DateTimeImmutable(),
+            $exclusive,
             $metadata
         );
     }

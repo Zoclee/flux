@@ -98,6 +98,32 @@ final class ConsumerRegistry
         return $count;
     }
 
+    public function hasExclusiveConsumer(string $virtualHost, string $destination): bool
+    {
+        foreach ($this->consumers as $consumer) {
+            if (
+                $consumer->virtualHost === $virtualHost
+                && $consumer->destination === $destination
+                && $consumer->exclusive
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function canRegisterConsumer(string $virtualHost, string $destination, bool $exclusive): bool
+    {
+        $consumerCount = $this->countByDestination($virtualHost, $destination);
+
+        if ($exclusive) {
+            return $consumerCount === 0;
+        }
+
+        return !$this->hasExclusiveConsumer($virtualHost, $destination);
+    }
+
     public function hasHadConsumer(string $virtualHost, string $destination): bool
     {
         return isset($this->consumedDestinations[$this->destinationKey($virtualHost, $destination)]);

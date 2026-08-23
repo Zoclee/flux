@@ -87,7 +87,7 @@ final class AmqpConnection
     private array $pendingPublishes = [];
 
     /**
-     * @var array<string, array{consumer: RuntimeConsumer, channel: int, queue: string, no_ack: bool}>
+     * @var array<string, array{consumer: RuntimeConsumer, channel: int, queue: string, no_ack: bool, exclusive: bool}>
      */
     private array $activeConsumers = [];
 
@@ -126,6 +126,7 @@ final class AmqpConnection
         }
 
         stream_set_blocking($this->socket, false);
+        stream_set_write_buffer($this->socket, 0);
         $this->codec = new FrameCodec($this->maxFrameSize);
         $this->consumers = $consumers ?? new ConsumerRegistry();
         $this->clock = $clock ?? static fn (): int => hrtime(true);
@@ -844,8 +845,8 @@ final class AmqpConnection
             throw new TopologyException('Consumer queue must not be empty.', TopologyException::PRECONDITION_FAILED);
         }
 
-        if ($noLocal || $exclusive) {
-            throw new TopologyException('no-local and exclusive consumers are not supported yet.', TopologyException::NOT_IMPLEMENTED);
+        if ($noLocal) {
+            throw new TopologyException('no-local consumers are not supported yet.', TopologyException::NOT_IMPLEMENTED);
         }
 
         if ($consumerTag === '') {
@@ -869,12 +870,21 @@ final class AmqpConnection
             return;
         }
 
-        $this->broker()->ensureQueueSubscription($this->openedVirtualHost(), $queue, 'amqp', $this->runtimeConnection->id);
+        $virtualHost = $this->openedVirtualHost();
+        $this->broker()->ensureQueueSubscription($virtualHost, $queue, 'amqp', $this->runtimeConnection->id);
+        if (!$this->consumers->canRegisterConsumer($virtualHost, $queue, $exclusive)) {
+            throw new TopologyException(
+                sprintf('ACCESS_REFUSED - queue "%s" already has an active consumer', $queue),
+                TopologyException::ACCESS_REFUSED
+            );
+        }
+
         $consumer = RuntimeConsumer::create(
             $this->runtimeConnection->id,
-            $this->openedVirtualHost(),
+            $virtualHost,
             $queue,
             'amqp',
+            $exclusive,
             ['protocol' => 'amqp-0-9-1', 'channel' => $frame->channel, 'consumer_tag' => $consumerTag]
         );
         $this->consumers->add($consumer);
@@ -883,6 +893,7 @@ final class AmqpConnection
             'channel' => $frame->channel,
             'queue' => $queue,
             'no_ack' => $noAck,
+            'exclusive' => $exclusive,
         ];
 
         if (!$noWait) {
@@ -1202,7 +1213,7 @@ final class AmqpConnection
                     $this->runtimeConnection->id
                 );
                 $this->sendPublishConfirm($channel);
-                $this->scheduleConsumerDelivery();
+                $this->deliverToConsumers();
             } catch (TopologyException $exception) {
                 $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
             } catch (ResourceLimitException $exception) {
@@ -1244,7 +1255,7 @@ final class AmqpConnection
                 );
             }
             $this->sendPublishConfirm($channel);
-            $this->scheduleConsumerDelivery();
+            $this->deliverToConsumers();
         } catch (TopologyException $exception) {
             $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
         } catch (ResourceLimitException $exception) {
@@ -1847,6 +1858,7 @@ final class AmqpConnection
     {
         return match ($exception->reason) {
             TopologyException::NOT_FOUND => 404,
+            TopologyException::ACCESS_REFUSED => 403,
             TopologyException::RESOURCE_LOCKED => 405,
             TopologyException::NOT_IMPLEMENTED => 540,
             default => 406,

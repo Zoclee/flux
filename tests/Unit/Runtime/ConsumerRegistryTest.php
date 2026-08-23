@@ -100,15 +100,70 @@ final class ConsumerRegistryTest extends TestCase
         self::assertFalse($registry->hasHadConsumer('/', 'orders'));
     }
 
-    private function consumer(string $id, string $connectionId): RuntimeConsumer
+    public function testExclusiveConsumerRegistrationRulesAreQueueWideAndRuntimeOnly(): void
+    {
+        $registry = new ConsumerRegistry();
+        $exclusive = $this->consumer(
+            '00000000-0000-4000-8000-000000000019',
+            '00000000-0000-4000-8000-000000000107',
+            destination: 'orders',
+            exclusive: true
+        );
+        $unrelated = $this->consumer(
+            '00000000-0000-4000-8000-000000000020',
+            '00000000-0000-4000-8000-000000000108',
+            destination: 'invoices'
+        );
+
+        self::assertTrue($registry->canRegisterConsumer('/', 'orders', true));
+        self::assertTrue($registry->canRegisterConsumer('/', 'orders', false));
+
+        $registry->add($exclusive);
+
+        self::assertTrue($registry->hasExclusiveConsumer('/', 'orders'));
+        self::assertFalse($registry->canRegisterConsumer('/', 'orders', false));
+        self::assertFalse($registry->canRegisterConsumer('/', 'orders', true));
+        self::assertTrue($registry->canRegisterConsumer('/', 'invoices', false));
+
+        $registry->add($unrelated);
+        self::assertSame(2, $registry->count());
+
+        self::assertTrue($registry->remove($exclusive->id));
+        self::assertFalse($registry->hasExclusiveConsumer('/', 'orders'));
+        self::assertTrue($registry->canRegisterConsumer('/', 'orders', false));
+        self::assertTrue($registry->canRegisterConsumer('/', 'orders', true));
+        self::assertSame(1, $registry->count());
+    }
+
+    public function testExclusiveConsumerCannotRegisterAfterNormalConsumer(): void
+    {
+        $registry = new ConsumerRegistry();
+        $consumer = $this->consumer(
+            '00000000-0000-4000-8000-000000000021',
+            '00000000-0000-4000-8000-000000000109'
+        );
+
+        $registry->add($consumer);
+
+        self::assertTrue($registry->canRegisterConsumer('/', 'orders', false));
+        self::assertFalse($registry->canRegisterConsumer('/', 'orders', true));
+    }
+
+    private function consumer(
+        string $id,
+        string $connectionId,
+        string $destination = 'orders',
+        bool $exclusive = false
+    ): RuntimeConsumer
     {
         return new RuntimeConsumer(
             $id,
             $connectionId,
             '/',
-            'orders',
+            $destination,
             'worker-a',
-            new DateTimeImmutable()
+            new DateTimeImmutable(),
+            $exclusive
         );
     }
 }
