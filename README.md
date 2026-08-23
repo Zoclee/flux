@@ -268,3 +268,5 @@ Live consumers, TCP connections, channels, sockets, and runtime statistics are n
 - `src/Support/` - small shared infrastructure
 - `tests/` - unit, integration, and fixture files
 - `var/` - runtime logs and process files
+
+<!-- graphify pre-commit test -->
