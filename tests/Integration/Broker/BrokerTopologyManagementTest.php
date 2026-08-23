@@ -146,6 +146,55 @@ final class BrokerTopologyManagementTest extends TestCase
         self::assertNull($this->destinations->findByName($this->virtualHostId, 'missing'));
     }
 
+    public function testActiveQueueDeclarationWithEmptyNameGeneratesUniqueQueueName(): void
+    {
+        $first = $this->broker->declareQueue('/', '', false, false);
+        $second = $this->broker->declareQueue('/', '', false, false);
+
+        self::assertStringStartsWith('amq.gen-', $first->name);
+        self::assertStringStartsWith('amq.gen-', $second->name);
+        self::assertNotSame($first->name, $second->name);
+        self::assertNotNull($this->destinations->findByName($this->virtualHostId, $first->name));
+        self::assertNotNull($this->destinations->findByName($this->virtualHostId, $second->name));
+    }
+
+    public function testPassiveQueueDeclarationWithEmptyNameDoesNotGenerateQueue(): void
+    {
+        try {
+            $this->broker->declareQueue('/', '', false, false, passive: true);
+            self::fail('Passive empty queue declaration should fail without generating a queue.');
+        } catch (TopologyException $exception) {
+            self::assertSame(TopologyException::PRECONDITION_FAILED, $exception->reason);
+        }
+
+        self::assertSame(0, $this->destinations->countQueuesByVirtualHost($this->virtualHostId));
+    }
+
+    public function testServerNamedQueueGenerationRetriesOnExistingNameCollision(): void
+    {
+        $this->broker->declareQueue('/', 'amq.gen-collision', false, false);
+        $names = ['amq.gen-collision', 'amq.gen-available'];
+        $broker = $this->brokerWithServerNamedQueueNames(static function () use (&$names): string {
+            return array_shift($names) ?? 'amq.gen-unused';
+        });
+
+        $generated = $broker->declareQueue('/', '', false, false);
+
+        self::assertSame('amq.gen-available', $generated->name);
+        self::assertNotNull($this->destinations->findByName($this->virtualHostId, 'amq.gen-collision'));
+        self::assertNotNull($this->destinations->findByName($this->virtualHostId, 'amq.gen-available'));
+    }
+
+    public function testExplicitlyNamedQueueDeclarationRemainsUnchanged(): void
+    {
+        $queue = $this->broker->declareQueue('/', 'orders', true, false);
+        $again = $this->broker->declareQueue('/', 'orders', true, false);
+
+        self::assertSame('orders', $queue->name);
+        self::assertSame($queue->id, $again->id);
+        self::assertSame(1, $this->destinations->countQueuesByVirtualHost($this->virtualHostId));
+    }
+
     public function testActiveIncompatibleQueueRedeclarationStillFails(): void
     {
         $this->broker->declareQueue('/', 'orders', true, false);
@@ -317,6 +366,22 @@ final class BrokerTopologyManagementTest extends TestCase
             ?? $subscriptions->create($destination->id, 'amqp');
 
         $this->deliveries->create($route->id, $subscription->id);
+    }
+
+    private function brokerWithServerNamedQueueNames(callable $serverNamedQueueNames): Broker
+    {
+        return new Broker(
+            new VirtualHostRepository($this->connection),
+            new PublishTransaction($this->connection),
+            $this->destinations,
+            new SubscriptionRepository($this->connection),
+            $this->deliveries,
+            $this->bindings,
+            $this->routingSources,
+            new MessageRouteRepository($this->connection),
+            new MessageRepository($this->connection),
+            serverNamedQueueNames: $serverNamedQueueNames
+        );
     }
 
     private function deliveryStateCount(int $destinationId, DeliveryState $state): int

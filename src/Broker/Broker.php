@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Flux\Broker;
 
+use Closure;
 use Flux\Persistence\Postgres\PublishTransaction;
 use Flux\Persistence\Postgres\BindingRepository;
 use Flux\Persistence\Postgres\DeliveryRepository;
@@ -14,10 +15,16 @@ use Flux\Persistence\Postgres\RoutingSourceRepository;
 use Flux\Persistence\Postgres\SubscriptionRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
 use Flux\Runtime\ExclusiveQueueRegistry;
+use Flux\Support\Uuid;
+use PDOException;
 use RuntimeException;
 
 final readonly class Broker
 {
+    private const SERVER_NAMED_QUEUE_MAX_ATTEMPTS = 16;
+
+    private Closure $serverNamedQueueNames;
+
     public function __construct(
         private VirtualHostRepository $virtualHosts,
         private PublishTransaction $publisher,
@@ -29,8 +36,12 @@ final readonly class Broker
         private ?MessageRouteRepository $messageRoutes = null,
         private ?MessageRepository $messages = null,
         private ?ResourceLimits $limits = null,
-        private ExclusiveQueueRegistry $exclusiveQueues = new ExclusiveQueueRegistry()
+        private ExclusiveQueueRegistry $exclusiveQueues = new ExclusiveQueueRegistry(),
+        ?callable $serverNamedQueueNames = null
     ) {
+        $this->serverNamedQueueNames = Closure::fromCallable(
+            $serverNamedQueueNames ?? static fn (): string => 'amq.gen-' . str_replace('-', '', Uuid::v4())
+        );
     }
 
     public function publish(PublishRequest $request): PublishResult
@@ -234,13 +245,24 @@ final readonly class Broker
         bool $exclusive = false,
         ?string $connectionId = null
     ): Destination {
-        if ($name === '') {
+        if ($name === '' && $passive) {
             throw new TopologyException('Queue name must not be empty.', TopologyException::PRECONDITION_FAILED);
         }
 
         $virtualHost = $this->virtualHosts->findByName($virtualHostName);
         if ($virtualHost === null) {
             throw VirtualHostNotFoundException::forName($virtualHostName);
+        }
+
+        if ($name === '') {
+            return $this->declareServerNamedQueue(
+                $virtualHostName,
+                $virtualHost->id,
+                $durable,
+                $autoDelete,
+                $exclusive,
+                $connectionId
+            );
         }
 
         $destination = $this->destinations->findByName($virtualHost->id, $name);
@@ -297,6 +319,57 @@ final readonly class Broker
         $this->ensureQueueSubscription($virtualHostName, $destination->name, 'amqp', $connectionId);
 
         return $destination;
+    }
+
+    private function declareServerNamedQueue(
+        string $virtualHostName,
+        int $virtualHostId,
+        bool $durable,
+        bool $autoDelete,
+        bool $exclusive,
+        ?string $connectionId
+    ): Destination {
+        $limits = $this->limits ?? new ResourceLimits();
+        if (!$limits->allows($limits->maxQueuesPerVirtualHost, $this->destinations->countQueuesByVirtualHost($virtualHostId))) {
+            throw new ResourceLimitException(sprintf('Queue limit reached for virtual host "%s".', $virtualHostName));
+        }
+
+        for ($attempt = 0; $attempt < self::SERVER_NAMED_QUEUE_MAX_ATTEMPTS; $attempt++) {
+            $name = ($this->serverNamedQueueNames)();
+            if ($name === '') {
+                continue;
+            }
+
+            if ($this->destinations->findByName($virtualHostId, $name) !== null) {
+                continue;
+            }
+
+            try {
+                $destination = $this->destinations->create(
+                    $virtualHostId,
+                    $name,
+                    DestinationType::Queue,
+                    $durable,
+                    $autoDelete,
+                    ['declared_by' => 'topology', 'exclusive' => $exclusive]
+                );
+            } catch (PDOException $exception) {
+                if ($exception->getCode() === '23505') {
+                    continue;
+                }
+
+                throw $exception;
+            }
+            if ($exclusive) {
+                $this->exclusiveQueues()->claim($virtualHostName, $destination->name, $this->requiredConnectionId($connectionId));
+            }
+
+            $this->ensureQueueSubscription($virtualHostName, $destination->name, 'amqp', $connectionId);
+
+            return $destination;
+        }
+
+        throw new RuntimeException('Could not generate a unique server-named queue.');
     }
 
     public function declareDirectRoutingSource(

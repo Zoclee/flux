@@ -254,6 +254,95 @@ final class AmqpPublishConsumeTest extends TestCase
         }
     }
 
+    public function testServerNamedExclusiveAutoDeleteQueuesUseGeneratedNamesAndOwnerLifecycle(): void
+    {
+        [$listener, $owner] = $this->startedListener();
+        $second = null;
+        $third = null;
+
+        try {
+            $this->connectAndOpenChannel($listener, $owner, 1);
+            $this->sendMethod($owner, 1, 50, 10, $this->queueDeclare(
+                '',
+                durable: false,
+                exclusive: true,
+                autoDelete: true
+            ));
+            $firstDeclareOk = $this->readMethodFrame($listener, $owner);
+            self::assertSame([50, 11], $firstDeclareOk->method());
+            $firstQueue = $this->queueDeclareName($firstDeclareOk);
+            self::assertNotSame('', $firstQueue);
+            self::assertStringStartsWith('amq.gen-', $firstQueue);
+
+            $this->publishBody($listener, $owner, 1, '', $firstQueue, 'first');
+            $this->sendMethod($owner, 1, 50, 10, $this->queueDeclare($firstQueue, passive: true, durable: false));
+            $firstPassiveOk = $this->readMethodFrame($listener, $owner);
+            self::assertSame([50, 11], $firstPassiveOk->method());
+            self::assertSame($firstQueue, $this->queueDeclareName($firstPassiveOk));
+            self::assertSame(1, $this->queueDeclareMessageCount($firstPassiveOk));
+
+            $this->sendMethod($owner, 1, 60, 70, $this->basicGet($firstQueue, noAck: true));
+            self::assertSame([60, 71], $this->readMethod($listener, $owner));
+            self::assertSame(Frame::TYPE_HEADER, $this->readFrame($listener, $owner)->type);
+            self::assertSame('first', $this->readFrame($listener, $owner)->payload);
+
+            $this->sendMethod($owner, 1, 50, 10, $this->queueDeclare(
+                '',
+                durable: false,
+                exclusive: true,
+                autoDelete: true
+            ));
+            $secondDeclareOk = $this->readMethodFrame($listener, $owner);
+            self::assertSame([50, 11], $secondDeclareOk->method());
+            $secondQueue = $this->queueDeclareName($secondDeclareOk);
+            self::assertNotSame('', $secondQueue);
+            self::assertNotSame($firstQueue, $secondQueue);
+
+            $this->publishBody($listener, $owner, 1, '', $secondQueue, 'second');
+            $this->sendMethod($owner, 1, 60, 20, $this->basicConsume($secondQueue, 'generated-consumer'));
+            self::assertSame([60, 21], $this->readMethod($listener, $owner));
+            self::assertSame('second', $this->readDeliveryBody($listener, $owner));
+
+            $second = $this->connectClient($listener, 1);
+            $this->sendMethod($second, 1, 50, 10, $this->queueDeclare($firstQueue, passive: true, durable: false));
+            $locked = $this->readMethodFrame($listener, $second);
+            self::assertSame([20, 40], $locked->method());
+            self::assertSame(405, $this->replyCode($locked));
+
+            $this->sendMethod($second, 2, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $second));
+            $this->sendMethod($second, 2, 50, 10, $this->queueDeclare('public.after-lock'));
+            self::assertSame([50, 11], $this->readMethod($listener, $second));
+
+            $this->sendMethod($owner, 0, 10, 50, pack('n', 200) . $this->shortString('') . pack('nn', 0, 0));
+            self::assertSame([10, 51], $this->readMethod($listener, $owner));
+            $this->awaitEof($listener, $owner);
+
+            self::assertFalse($this->queueExists($firstQueue));
+            self::assertFalse($this->queueExists($secondQueue));
+
+            $third = $this->connectClient($listener, 1);
+            $this->sendMethod($third, 1, 50, 10, $this->queueDeclare($firstQueue, passive: true, durable: false));
+            $missingFirst = $this->readMethodFrame($listener, $third);
+            self::assertSame([20, 40], $missingFirst->method());
+            self::assertSame(404, $this->replyCode($missingFirst));
+
+            $this->sendMethod($third, 2, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $third));
+            $this->sendMethod($third, 2, 50, 10, $this->queueDeclare($secondQueue, passive: true, durable: false));
+            $missingSecond = $this->readMethodFrame($listener, $third);
+            self::assertSame([20, 40], $missingSecond->method());
+            self::assertSame(404, $this->replyCode($missingSecond));
+        } finally {
+            foreach ([$owner, $second, $third] as $client) {
+                if (is_resource($client)) {
+                    fclose($client);
+                }
+            }
+            $listener->stop();
+        }
+    }
+
     public function testQueueDeclareOkReportsZeroMessagesForEmptyQueue(): void
     {
         [$listener, $client] = $this->startedListener();
@@ -2807,6 +2896,13 @@ final class AmqpPublishConsumeTest extends TestCase
         $reader->readShortString();
 
         return $reader->readLong();
+    }
+
+    private function queueDeclareName(Frame $frame): string
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+
+        return $reader->readShortString();
     }
 
     private function queueDeclareConsumerCount(Frame $frame): int
