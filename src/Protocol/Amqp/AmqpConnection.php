@@ -890,7 +890,9 @@ final class AmqpConnection
             return;
         }
 
-        $this->cancelConsumer($consumerTag);
+        $queue = $state['queue'];
+        $this->cancelConsumer($consumerTag, deleteAutoDeleteQueue: false);
+        $this->deleteAutoDeleteQueueAfterFinalConsumer($this->openedVirtualHost(), $queue);
 
         if (($bits & 0b00000001) === 0) {
             $this->writeFrame(Frame::methodFrame($frame->channel, 60, 31, $this->shortString($consumerTag)));
@@ -1441,13 +1443,13 @@ final class AmqpConnection
         }
     }
 
-    private function cancelConsumer(string $consumerTag): void
+    private function cancelConsumer(string $consumerTag, bool $deleteAutoDeleteQueue = true): void
     {
         $this->releaseOutstandingDeliveriesForConsumer($consumerTag);
-        $this->removeConsumer($consumerTag);
+        $this->removeConsumer($consumerTag, $deleteAutoDeleteQueue);
     }
 
-    private function removeConsumer(string $consumerTag): void
+    private function removeConsumer(string $consumerTag, bool $deleteAutoDeleteQueue = true): void
     {
         $state = $this->activeConsumers[$consumerTag] ?? null;
         if ($state === null) {
@@ -1456,6 +1458,34 @@ final class AmqpConnection
 
         $this->consumers->remove($state['consumer']->id);
         unset($this->activeConsumers[$consumerTag]);
+
+        if ($deleteAutoDeleteQueue) {
+            $this->deleteAutoDeleteQueueAfterFinalConsumer($state['consumer']->virtualHost, $state['queue']);
+        }
+    }
+
+    private function deleteAutoDeleteQueueAfterFinalConsumer(string $virtualHost, string $queue): void
+    {
+        if (!$this->consumers->hasHadConsumer($virtualHost, $queue)) {
+            return;
+        }
+
+        if ($this->consumers->countByDestination($virtualHost, $queue) > 0) {
+            return;
+        }
+
+        try {
+            $status = $this->broker()->queueStatus($virtualHost, $queue, $this->runtimeConnection->id);
+            if (!$status->destination->autoDelete) {
+                return;
+            }
+
+            $this->broker()->deleteQueue($virtualHost, $queue, connectionId: $this->runtimeConnection->id);
+        } catch (TopologyException $exception) {
+            if ($exception->reason !== TopologyException::NOT_FOUND) {
+                throw $exception;
+            }
+        }
     }
 
     private function removeConsumersForQueue(string $queue): void

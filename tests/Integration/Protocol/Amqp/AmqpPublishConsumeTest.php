@@ -1482,6 +1482,267 @@ final class AmqpPublishConsumeTest extends TestCase
         );
     }
 
+    public function testAutoDeleteQueueLifecycleDeliversThenDeletesAfterFinalCancel(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.orders', durable: false, autoDelete: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            self::assertTrue($this->queueExists('auto.orders'));
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.orders', passive: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('auto.orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertTrue($this->queueExists('auto.orders'));
+
+            $this->publishBody($listener, $client, 1, '', 'auto.orders', 'hello-auto-delete');
+            $deliver = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 60], $deliver->method());
+            $deliveryTag = $this->deliveryTagFromDeliver($deliver);
+            $this->readFrame($listener, $client);
+            self::assertSame('hello-auto-delete', $this->readFrame($listener, $client)->payload);
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong($deliveryTag) . "\x00");
+            $listener->tick();
+
+            $this->sendMethod($client, 1, 60, 30, $this->basicCancel('consumer-a'));
+            self::assertSame([60, 31], $this->readMethod($listener, $client));
+            self::assertFalse($this->queueExists('auto.orders'));
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.orders', passive: true));
+            $close = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(404, $this->replyCode($close));
+
+            $this->sendMethod($client, 2, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 2, 50, 10, $this->queueDeclare('auto.orders', durable: false, autoDelete: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            self::assertTrue($this->queueExists('auto.orders'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testAutoDeleteQueueWithMultipleConsumersDeletesOnlyAfterFinalCancel(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.multi', durable: false, autoDelete: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('auto.multi', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('auto.multi', 'consumer-b'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 30, $this->basicCancel('consumer-a'));
+            self::assertSame([60, 31], $this->readMethod($listener, $client));
+            self::assertTrue($this->queueExists('auto.multi'));
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.multi', passive: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 30, $this->basicCancel('consumer-b'));
+            self::assertSame([60, 31], $this->readMethod($listener, $client));
+            self::assertFalse($this->queueExists('auto.multi'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testAutoDeleteQueueCleanupIgnoresConsumersOnAnotherQueue(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.shared-a', durable: false, autoDelete: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.shared-b', durable: false, autoDelete: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('auto.shared-a', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('auto.shared-b', 'consumer-b'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 60, 30, $this->basicCancel('consumer-a'));
+            self::assertSame([60, 31], $this->readMethod($listener, $client));
+
+            self::assertFalse($this->queueExists('auto.shared-a'));
+            self::assertTrue($this->queueExists('auto.shared-b'));
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.shared-b', passive: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testAutoDeleteQueueDeletesWhenConsumerChannelCloses(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.channel', durable: false, autoDelete: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('auto.channel', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 20, 40, pack('n', 200) . $this->shortString('Goodbye') . pack('nn', 0, 0))));
+            self::assertSame([20, 41], $this->readMethod($listener, $client));
+
+            self::assertFalse($this->queueExists('auto.channel'));
+            $this->sendMethod($client, 2, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 2, 50, 10, $this->queueDeclare('auto.channel', passive: true));
+            $close = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(404, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testAutoDeleteQueueDeletesWhenConsumerConnectionClosesGracefully(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.connection-close', durable: false, autoDelete: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('auto.connection-close', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(0, 10, 50, pack('n', 200) . $this->shortString('Goodbye') . pack('nn', 0, 0))));
+            self::assertSame([10, 51], $this->readMethod($listener, $client));
+            $this->awaitEof($listener, $client);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertFalse($this->queueExists('auto.connection-close'));
+    }
+
+    public function testAutoDeleteQueueDeletesWhenConsumerConnectionDisconnects(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.disconnect', durable: false, autoDelete: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('auto.disconnect', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            fclose($client);
+            for ($attempt = 0; $attempt < 10; $attempt++) {
+                $listener->tick();
+                usleep(1000);
+            }
+        } finally {
+            $listener->stop();
+        }
+
+        self::assertFalse($this->queueExists('auto.disconnect'));
+    }
+
+    public function testAutoDeleteQueueDeletesWhenHeartbeatTimeoutRemovesConsumer(): void
+    {
+        $now = 0;
+        $listener = new AmqpListener(
+            new ConnectionRegistry(),
+            '127.0.0.1',
+            0,
+            broker: $this->broker(),
+            authenticator: $this->authenticator(),
+            authorizer: $this->authorizer(),
+            consumers: new ConsumerRegistry(),
+            heartbeatInterval: 1,
+            clock: static function () use (&$now): int {
+                return $now * 1_000_000_000;
+            }
+        );
+        $listener->start();
+        $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $listener->port()), $errorCode, $errorMessage, 1.0);
+        self::assertIsResource($client, sprintf('Could not connect to AMQP listener: %s', $errorMessage));
+        stream_set_blocking($client, false);
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.heartbeat', durable: false, autoDelete: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('auto.heartbeat', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+
+            $now = 2;
+            $listener->tick();
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertFalse($this->queueExists('auto.heartbeat'));
+    }
+
+    public function testAutoDeleteQueueWithoutConsumerSurvivesZeroConsumerCleanupPaths(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.never-used', durable: false, autoDelete: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('auto.never-used', passive: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+
+            fclose($client);
+            for ($attempt = 0; $attempt < 10; $attempt++) {
+                $listener->tick();
+                usleep(1000);
+            }
+        } finally {
+            $listener->stop();
+        }
+
+        self::assertTrue($this->queueExists('auto.never-used'));
+    }
+
+    public function testNonAutoDeleteQueueSurvivesFinalConsumerCancel(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('manual.orders', durable: false, autoDelete: false));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('manual.orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 30, $this->basicCancel('consumer-a'));
+            self::assertSame([60, 31], $this->readMethod($listener, $client));
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('manual.orders', passive: true));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertTrue($this->queueExists('manual.orders'));
+    }
+
     public function testBasicCancelBeforeAnyDeliveryRemovesConsumerAndSendsNoFurtherDeliveries(): void
     {
         $consumers = new ConsumerRegistry();
@@ -2665,6 +2926,11 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertCount(1, $deliveries);
 
         return $deliveries[0];
+    }
+
+    private function queueExists(string $queue): bool
+    {
+        return (new DestinationRepository($this->connection))->findByName($this->virtualHostId, $queue) !== null;
     }
 
     /**

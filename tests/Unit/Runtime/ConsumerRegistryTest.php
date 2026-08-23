@@ -79,6 +79,27 @@ final class ConsumerRegistryTest extends TestCase
         self::assertSame(0, $registry->count());
     }
 
+    public function testDestinationConsumerHistorySurvivesFinalConsumerRemovalUntilClear(): void
+    {
+        $registry = new ConsumerRegistry();
+        $consumer = $this->consumer(
+            '00000000-0000-4000-8000-000000000018',
+            '00000000-0000-4000-8000-000000000106'
+        );
+
+        self::assertFalse($registry->hasHadConsumer('/', 'orders'));
+
+        $registry->add($consumer);
+        self::assertTrue($registry->hasHadConsumer('/', 'orders'));
+
+        $registry->remove($consumer->id);
+        self::assertSame(0, $registry->countByDestination('/', 'orders'));
+        self::assertTrue($registry->hasHadConsumer('/', 'orders'));
+
+        $registry->clear();
+        self::assertFalse($registry->hasHadConsumer('/', 'orders'));
+    }
+
     private function consumer(string $id, string $connectionId): RuntimeConsumer
     {
         return new RuntimeConsumer(

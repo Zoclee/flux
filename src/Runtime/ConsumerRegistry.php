@@ -11,6 +11,11 @@ final class ConsumerRegistry
      */
     private array $consumers = [];
 
+    /**
+     * @var array<string, true>
+     */
+    private array $consumedDestinations = [];
+
     public function add(RuntimeConsumer $consumer): void
     {
         if (isset($this->consumers[$consumer->id])) {
@@ -21,6 +26,7 @@ final class ConsumerRegistry
         }
 
         $this->consumers[$consumer->id] = $consumer;
+        $this->consumedDestinations[$this->destinationKey($consumer->virtualHost, $consumer->destination)] = true;
     }
 
     public function remove(string $consumerId): bool
@@ -92,8 +98,19 @@ final class ConsumerRegistry
         return $count;
     }
 
+    public function hasHadConsumer(string $virtualHost, string $destination): bool
+    {
+        return isset($this->consumedDestinations[$this->destinationKey($virtualHost, $destination)]);
+    }
+
     public function clear(): void
     {
         $this->consumers = [];
+        $this->consumedDestinations = [];
+    }
+
+    private function destinationKey(string $virtualHost, string $destination): string
+    {
+        return $virtualHost . "\0" . $destination;
     }
 }
