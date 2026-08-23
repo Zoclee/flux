@@ -8,3 +8,5 @@
 
 /var/run/*
 !/var/run/.gitkeep
+
+graphify-out/cache/
