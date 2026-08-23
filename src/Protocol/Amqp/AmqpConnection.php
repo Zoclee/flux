@@ -101,6 +101,8 @@ final class AmqpConnection
      */
     private array $unackedDeliveries = [];
 
+    private bool $consumerDeliveryScheduled = false;
+
     /**
      * @param resource $socket
      */
@@ -215,6 +217,8 @@ final class AmqpConnection
             $this->handleFrame($frame);
             $this->lastReceivedAt = $receivedAt;
         }
+
+        $this->flushScheduledConsumerDeliveries();
     }
 
     public function close(): void
@@ -538,7 +542,7 @@ final class AmqpConnection
 
         $this->prefetchCounts[$frame->channel] = $prefetchCount;
         $this->writeFrame(Frame::methodFrame($frame->channel, 60, 11));
-        $this->deliverToConsumers();
+        $this->scheduleConsumerDelivery();
     }
 
     private function handleConfirmSelect(Frame $frame): void
@@ -885,7 +889,7 @@ final class AmqpConnection
             $this->writeFrame(Frame::methodFrame($frame->channel, 60, 21, $this->shortString($consumerTag)));
         }
 
-        $this->deliverToConsumers();
+        $this->scheduleConsumerDelivery();
     }
 
     private function handleBasicCancel(Frame $frame): void
@@ -908,7 +912,7 @@ final class AmqpConnection
         }
 
         $queue = $state['queue'];
-        $this->cancelConsumer($consumerTag, deleteAutoDeleteQueue: false);
+        $this->removeConsumer($consumerTag, deleteAutoDeleteQueue: false);
         $this->deleteAutoDeleteQueueAfterFinalConsumer($this->openedVirtualHost(), $queue);
 
         if (($bits & 0b00000001) === 0) {
@@ -997,9 +1001,8 @@ final class AmqpConnection
         }
 
         $this->broker()->acknowledge(new AcknowledgeRequest($mapping['delivery']->id));
-        unset($this->unackedDeliveries[$frame->channel][$deliveryTag]);
-        $this->clearEmptyUnackedChannel($frame->channel);
-        $this->deliverToConsumers();
+        $this->forgetUnackedDelivery($frame->channel, $deliveryTag);
+        $this->scheduleConsumerDelivery();
     }
 
     private function handleBasicReject(Frame $frame): void
@@ -1021,9 +1024,8 @@ final class AmqpConnection
             $this->broker()->reject(new RejectRequest($mapping['delivery']->id));
         }
 
-        unset($this->unackedDeliveries[$frame->channel][$deliveryTag]);
-        $this->clearEmptyUnackedChannel($frame->channel);
-        $this->deliverToConsumers();
+        $this->forgetUnackedDelivery($frame->channel, $deliveryTag);
+        $this->scheduleConsumerDelivery();
     }
 
     private function handleBasicNack(Frame $frame): void
@@ -1050,9 +1052,8 @@ final class AmqpConnection
             $this->broker()->reject(new RejectRequest($mapping['delivery']->id));
         }
 
-        unset($this->unackedDeliveries[$frame->channel][$deliveryTag]);
-        $this->clearEmptyUnackedChannel($frame->channel);
-        $this->deliverToConsumers();
+        $this->forgetUnackedDelivery($frame->channel, $deliveryTag);
+        $this->scheduleConsumerDelivery();
     }
 
     private function handleContentFrame(Frame $frame): void
@@ -1157,6 +1158,7 @@ final class AmqpConnection
                     $this->runtimeConnection->id
                 );
                 $this->sendPublishConfirm($channel);
+                $this->scheduleConsumerDelivery();
             } catch (TopologyException $exception) {
                 $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
             } catch (ResourceLimitException $exception) {
@@ -1198,6 +1200,7 @@ final class AmqpConnection
                 );
             }
             $this->sendPublishConfirm($channel);
+            $this->scheduleConsumerDelivery();
         } catch (TopologyException $exception) {
             $this->sendChannelError($channel, $this->replyCodeForTopologyException($exception), $exception->getMessage(), 60, 40);
         } catch (ResourceLimitException $exception) {
@@ -1310,7 +1313,22 @@ final class AmqpConnection
                 'queue' => $state['queue'],
             ];
         }
+        }
     }
+
+    private function scheduleConsumerDelivery(): void
+    {
+        $this->consumerDeliveryScheduled = true;
+    }
+
+    private function flushScheduledConsumerDeliveries(): void
+    {
+        if (!$this->consumerDeliveryScheduled) {
+            return;
+        }
+
+        $this->consumerDeliveryScheduled = false;
+        $this->deliverToConsumers();
     }
 
     private function sendDelivery(
@@ -1566,16 +1584,9 @@ final class AmqpConnection
             }
 
             foreach ($deliveries as $deliveryTag => $mapping) {
-                try {
-                    $this->broker()->release(new ReleaseRequest($mapping['delivery']->id));
-                    $released++;
-                } catch (RuntimeException) {
-                }
-                unset($this->unackedDeliveries[$deliveryChannel][$deliveryTag]);
-            }
-
-            if (($this->unackedDeliveries[$deliveryChannel] ?? []) === []) {
-                unset($this->unackedDeliveries[$deliveryChannel]);
+                $this->broker()->release(new ReleaseRequest($mapping['delivery']->id));
+                $released++;
+                $this->forgetUnackedDelivery($deliveryChannel, $deliveryTag);
             }
         }
 
@@ -1594,15 +1605,10 @@ final class AmqpConnection
                     continue;
                 }
 
-                try {
-                    $this->broker()->release(new ReleaseRequest($mapping['delivery']->id));
-                    $released++;
-                } catch (RuntimeException) {
-                }
-                unset($this->unackedDeliveries[$channel][$deliveryTag]);
+                $this->broker()->release(new ReleaseRequest($mapping['delivery']->id));
+                $released++;
+                $this->forgetUnackedDelivery($channel, $deliveryTag);
             }
-
-            $this->clearEmptyUnackedChannel($channel);
         }
 
         if ($released > 0) {
@@ -1654,6 +1660,12 @@ final class AmqpConnection
         if (($this->unackedDeliveries[$channel] ?? []) === []) {
             unset($this->unackedDeliveries[$channel]);
         }
+    }
+
+    private function forgetUnackedDelivery(int $channel, int $deliveryTag): void
+    {
+        unset($this->unackedDeliveries[$channel][$deliveryTag]);
+        $this->clearEmptyUnackedChannel($channel);
     }
 
     private function broker(): Broker
