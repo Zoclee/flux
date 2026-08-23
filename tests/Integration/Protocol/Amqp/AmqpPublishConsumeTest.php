@@ -118,6 +118,142 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame(7, $message->priority);
     }
 
+    public function testExclusiveQueueLifecycleIsScopedToOwningConnection(): void
+    {
+        [$listener, $owner] = $this->startedListener();
+        $second = null;
+        $third = null;
+
+        try {
+            $this->connectAndOpenChannel($listener, $owner, 1);
+            $this->sendMethod($owner, 1, 50, 10, $this->queueDeclare(
+                'exclusive.orders',
+                durable: false,
+                exclusive: true,
+                autoDelete: false
+            ));
+            self::assertSame([50, 11], $this->readMethod($listener, $owner));
+
+            $this->publishBody($listener, $owner, 1, '', 'exclusive.orders', 'owned-message');
+
+            $this->sendMethod($owner, 1, 50, 10, $this->queueDeclare(
+                'exclusive.orders',
+                passive: true,
+                durable: false,
+                exclusive: true
+            ));
+            self::assertSame([50, 11], $this->readMethod($listener, $owner));
+
+            $second = $this->connectClient($listener, 1);
+            $this->sendMethod($second, 1, 50, 10, $this->queueDeclare(
+                'exclusive.orders',
+                passive: true,
+                durable: false
+            ));
+            $locked = $this->readMethodFrame($listener, $second);
+            self::assertSame([20, 40], $locked->method());
+            self::assertSame(405, $this->replyCode($locked));
+
+            $this->sendMethod($second, 2, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $second));
+            $this->sendMethod($second, 2, 60, 20, $this->basicConsume('exclusive.orders', 'blocked-consumer'));
+            $locked = $this->readMethodFrame($listener, $second);
+            self::assertSame([20, 40], $locked->method());
+            self::assertSame(405, $this->replyCode($locked));
+
+            $this->sendMethod($second, 3, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $second));
+            $this->sendMethod($second, 3, 60, 70, $this->basicGet('exclusive.orders', noAck: true));
+            $locked = $this->readMethodFrame($listener, $second);
+            self::assertSame([20, 40], $locked->method());
+            self::assertSame(405, $this->replyCode($locked));
+
+            $this->sendMethod($second, 4, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $second));
+            $this->sendMethod($second, 4, 50, 30, $this->queuePurge('exclusive.orders'));
+            $locked = $this->readMethodFrame($listener, $second);
+            self::assertSame([20, 40], $locked->method());
+            self::assertSame(405, $this->replyCode($locked));
+
+            $this->sendMethod($second, 5, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $second));
+            $this->sendMethod($second, 5, 50, 40, $this->queueDelete('exclusive.orders'));
+            $locked = $this->readMethodFrame($listener, $second);
+            self::assertSame([20, 40], $locked->method());
+            self::assertSame(405, $this->replyCode($locked));
+
+            $this->sendMethod($second, 6, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $second));
+            $this->sendMethod($second, 6, 40, 10, $this->exchangeDeclare('blocked.direct', 'direct'));
+            self::assertSame([40, 11], $this->readMethod($listener, $second));
+            $this->sendMethod($second, 6, 50, 20, $this->queueBind('exclusive.orders', 'blocked.direct', 'key'));
+            $locked = $this->readMethodFrame($listener, $second);
+            self::assertSame([20, 40], $locked->method());
+            self::assertSame(405, $this->replyCode($locked));
+
+            $this->sendMethod($second, 7, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $second));
+            $this->sendMethod($second, 7, 50, 10, $this->queueDeclare('public.orders'));
+            self::assertSame([50, 11], $this->readMethod($listener, $second));
+
+            $this->sendMethod($owner, 1, 60, 70, $this->basicGet('exclusive.orders', noAck: true));
+            self::assertSame([60, 71], $this->readMethod($listener, $owner));
+            $header = $this->readFrame($listener, $owner);
+            self::assertSame(Frame::TYPE_HEADER, $header->type);
+            self::assertSame(13, $this->bodySizeFromHeader($header));
+            $body = $this->readFrame($listener, $owner);
+            self::assertSame(Frame::TYPE_BODY, $body->type);
+            self::assertSame('owned-message', $body->payload);
+
+            $this->sendMethod($owner, 0, 10, 50, pack('n', 200) . $this->shortString('') . pack('nn', 0, 0));
+            self::assertSame([10, 51], $this->readMethod($listener, $owner));
+            $this->awaitEof($listener, $owner);
+
+            self::assertNull((new DestinationRepository($this->connection))->findByName($this->virtualHostId, 'exclusive.orders'));
+            self::assertSame(1, $this->tableCount('messages'));
+
+            $third = $this->connectClient($listener, 1);
+            $this->sendMethod($third, 1, 50, 10, $this->queueDeclare(
+                'exclusive.orders',
+                passive: true,
+                durable: false
+            ));
+            $missing = $this->readMethodFrame($listener, $third);
+            self::assertSame([20, 40], $missing->method());
+            self::assertSame(404, $this->replyCode($missing));
+        } finally {
+            foreach ([$owner, $second, $third] as $client) {
+                if (is_resource($client)) {
+                    fclose($client);
+                }
+            }
+            $listener->stop();
+        }
+    }
+
+    public function testExclusiveQueueDoesNotSurviveRuntimeRestart(): void
+    {
+        $broker = $this->broker();
+        $broker->declareQueue(
+            '/',
+            'stale.exclusive',
+            durable: false,
+            autoDelete: false,
+            exclusive: true,
+            connectionId: '00000000-0000-4000-8000-000000000001'
+        );
+        self::assertNotNull((new DestinationRepository($this->connection))->findByName($this->virtualHostId, 'stale.exclusive'));
+
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            self::assertNull((new DestinationRepository($this->connection))->findByName($this->virtualHostId, 'stale.exclusive'));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testQueueDeclareOkReportsZeroMessagesForEmptyQueue(): void
     {
         [$listener, $client] = $this->startedListener();
@@ -2116,6 +2252,19 @@ final class AmqpPublishConsumeTest extends TestCase
     }
 
     /**
+     * @return resource
+     */
+    private function connectClient(AmqpListener $listener, int $channel, int $heartbeat = 60): mixed
+    {
+        $client = @stream_socket_client(sprintf('tcp://127.0.0.1:%d', $listener->port()), $errorCode, $errorMessage, 1.0);
+        self::assertIsResource($client, sprintf('Could not connect to AMQP listener: %s', $errorMessage));
+        stream_set_blocking($client, false);
+        $this->connectAndOpenChannel($listener, $client, $channel, $heartbeat);
+
+        return $client;
+    }
+
+    /**
      * @param resource $client
      */
     private function sendMethod(mixed $client, int $channel, int $classId, int $methodId, string $arguments = ''): void
@@ -2176,6 +2325,11 @@ final class AmqpPublishConsumeTest extends TestCase
     private function basicGet(string $queue, bool $noAck = false): string
     {
         return pack('n', 0) . $this->shortString($queue) . chr($noAck ? 1 : 0);
+    }
+
+    private function queuePurge(string $queue, bool $noWait = false): string
+    {
+        return pack('n', 0) . $this->shortString($queue) . chr($noWait ? 1 : 0);
     }
 
     private function queueDelete(string $queue, bool $ifUnused = false, bool $ifEmpty = false, bool $noWait = false): string

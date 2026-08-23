@@ -23,4 +23,9 @@ final readonly class Destination
         public DateTimeImmutable $updatedAt
     ) {
     }
+
+    public function exclusive(): bool
+    {
+        return ($this->metadata['exclusive'] ?? false) === true;
+    }
 }

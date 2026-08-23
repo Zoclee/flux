@@ -11,6 +11,7 @@ final class TopologyException extends RuntimeException
     public const NOT_FOUND = 'not_found';
     public const PRECONDITION_FAILED = 'precondition_failed';
     public const NOT_IMPLEMENTED = 'not_implemented';
+    public const RESOURCE_LOCKED = 'resource_locked';
 
     public function __construct(
         string $message,

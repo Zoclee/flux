@@ -13,6 +13,7 @@ use Flux\Persistence\Postgres\MessageRouteRepository;
 use Flux\Persistence\Postgres\RoutingSourceRepository;
 use Flux\Persistence\Postgres\SubscriptionRepository;
 use Flux\Persistence\Postgres\VirtualHostRepository;
+use Flux\Runtime\ExclusiveQueueRegistry;
 use RuntimeException;
 
 final readonly class Broker
@@ -27,7 +28,8 @@ final readonly class Broker
         private ?RoutingSourceRepository $routingSources = null,
         private ?MessageRouteRepository $messageRoutes = null,
         private ?MessageRepository $messages = null,
-        private ?ResourceLimits $limits = null
+        private ?ResourceLimits $limits = null,
+        private ExclusiveQueueRegistry $exclusiveQueues = new ExclusiveQueueRegistry()
     ) {
     }
 
@@ -76,6 +78,7 @@ final readonly class Broker
         if ($destination === null) {
             throw DestinationNotFoundException::forName($request->virtualHost, $request->destination);
         }
+        $this->assertQueueAccess($request->virtualHost, $destination, $request->connectionId);
 
         $subscription = $this->subscriptions->findByName($destination->id, $request->subscription);
 
@@ -141,7 +144,8 @@ final readonly class Broker
         ?string $contentEncoding = null,
         int $priority = 0,
         bool $persistent = true,
-        ?string $messageId = null
+        ?string $messageId = null,
+        ?string $connectionId = null
     ): PublishResult {
         $virtualHost = $this->virtualHosts->findByName($virtualHostName);
         if ($virtualHost === null) {
@@ -152,6 +156,7 @@ final readonly class Broker
         if ($destination === null || $destination->type !== DestinationType::Queue) {
             throw new TopologyException(sprintf('Queue "%s" does not exist.', $queue), TopologyException::NOT_FOUND);
         }
+        $this->assertQueueAccess($virtualHostName, $destination, $connectionId);
 
         return $this->publisher->publishToDestination(
             $destination->id,
@@ -165,7 +170,12 @@ final readonly class Broker
         );
     }
 
-    public function ensureQueueSubscription(string $virtualHostName, string $queue, string $subscriptionName): Subscription
+    public function ensureQueueSubscription(
+        string $virtualHostName,
+        string $queue,
+        string $subscriptionName,
+        ?string $connectionId = null
+    ): Subscription
     {
         if ($subscriptionName === '') {
             throw new TopologyException('Subscription name must not be empty.', TopologyException::PRECONDITION_FAILED);
@@ -180,6 +190,7 @@ final readonly class Broker
         if ($destination === null || $destination->type !== DestinationType::Queue) {
             throw new TopologyException(sprintf('Queue "%s" does not exist.', $queue), TopologyException::NOT_FOUND);
         }
+        $this->assertQueueAccess($virtualHostName, $destination, $connectionId);
 
         $subscription = $this->subscriptions->findByName($destination->id, $subscriptionName);
         if ($subscription !== null) {
@@ -203,13 +214,13 @@ final readonly class Broker
         return $this->deliveries->countReadyByDestination($destination->id);
     }
 
-    public function queueStatus(string $virtualHostName, string $name): QueueStatus
+    public function queueStatus(string $virtualHostName, string $name, ?string $connectionId = null): QueueStatus
     {
         if ($name === '') {
             throw new TopologyException('Queue name must not be empty.', TopologyException::PRECONDITION_FAILED);
         }
 
-        $destination = $this->queueDestination($virtualHostName, $name);
+        $destination = $this->queueDestination($virtualHostName, $name, $connectionId);
 
         return new QueueStatus($destination, $this->readyMessageCount($destination));
     }
@@ -219,7 +230,9 @@ final readonly class Broker
         string $name,
         bool $durable,
         bool $autoDelete,
-        bool $passive = false
+        bool $passive = false,
+        bool $exclusive = false,
+        ?string $connectionId = null
     ): Destination {
         if ($name === '') {
             throw new TopologyException('Queue name must not be empty.', TopologyException::PRECONDITION_FAILED);
@@ -247,10 +260,13 @@ final readonly class Broker
                 DestinationType::Queue,
                 $durable,
                 $autoDelete,
-                ['declared_by' => 'topology']
+                ['declared_by' => 'topology', 'exclusive' => $exclusive]
             );
+            if ($exclusive) {
+                $this->exclusiveQueues()->claim($virtualHostName, $destination->name, $this->requiredConnectionId($connectionId));
+            }
 
-            $this->ensureQueueSubscription($virtualHostName, $destination->name, 'amqp');
+            $this->ensureQueueSubscription($virtualHostName, $destination->name, 'amqp', $connectionId);
 
             return $destination;
         }
@@ -259,14 +275,18 @@ final readonly class Broker
             if ($destination->type !== DestinationType::Queue) {
                 throw new TopologyException(sprintf('Queue "%s" does not exist.', $name), TopologyException::NOT_FOUND);
             }
+            $this->assertQueueAccess($virtualHostName, $destination, $connectionId);
 
             return $destination;
         }
+
+        $this->assertQueueAccess($virtualHostName, $destination, $connectionId);
 
         if (
             $destination->type !== DestinationType::Queue
             || $destination->durable !== $durable
             || $destination->autoDelete !== $autoDelete
+            || $destination->exclusive() !== $exclusive
         ) {
             throw new TopologyException(
                 sprintf('Queue "%s" exists with incompatible properties.', $name),
@@ -274,7 +294,7 @@ final readonly class Broker
             );
         }
 
-        $this->ensureQueueSubscription($virtualHostName, $destination->name, 'amqp');
+        $this->ensureQueueSubscription($virtualHostName, $destination->name, 'amqp', $connectionId);
 
         return $destination;
     }
@@ -417,7 +437,13 @@ final readonly class Broker
         return $source;
     }
 
-    public function bindQueue(string $virtualHostName, string $source, string $queue, string $routingKey): ?Binding
+    public function bindQueue(
+        string $virtualHostName,
+        string $source,
+        string $queue,
+        string $routingKey,
+        ?string $connectionId = null
+    ): ?Binding
     {
         $virtualHost = $this->virtualHosts->findByName($virtualHostName);
         if ($virtualHost === null) {
@@ -428,6 +454,7 @@ final readonly class Broker
         if ($destination === null || $destination->type !== DestinationType::Queue) {
             throw new TopologyException(sprintf('Queue "%s" does not exist.', $queue), TopologyException::NOT_FOUND);
         }
+        $this->assertQueueAccess($virtualHostName, $destination, $connectionId);
 
         if ($source === '') {
             if ($routingKey !== $queue) {
@@ -454,25 +481,34 @@ final readonly class Broker
         return $bindings->create($virtualHost->id, $source, $destination->id, $routingKey, ['declared_by' => 'topology']);
     }
 
-    public function purgeQueue(string $virtualHostName, string $queue): int
+    public function purgeQueue(string $virtualHostName, string $queue, ?string $connectionId = null): int
     {
-        $destination = $this->queueDestination($virtualHostName, $queue);
+        $destination = $this->queueDestination($virtualHostName, $queue, $connectionId);
 
         return $this->deliveries->rejectOutstandingByDestination($destination->id);
     }
 
-    public function deleteQueue(string $virtualHostName, string $queue, bool $ifEmpty = false): int
+    public function deleteQueue(string $virtualHostName, string $queue, bool $ifEmpty = false, ?string $connectionId = null): int
     {
-        $destination = $this->queueDestination($virtualHostName, $queue);
+        $destination = $this->queueDestination($virtualHostName, $queue, $connectionId);
 
         if ($ifEmpty && $this->deliveries->countOutstandingByDestination($destination->id) > 0) {
             throw new TopologyException(sprintf('Queue "%s" is not empty.', $queue), TopologyException::PRECONDITION_FAILED);
         }
 
-        return $this->destinations->deleteQueueGraph($destination->id);
+        $count = $this->destinations->deleteQueueGraph($destination->id);
+        $this->exclusiveQueues()->release($virtualHostName, $destination->name);
+
+        return $count;
     }
 
-    public function unbindQueue(string $virtualHostName, string $source, string $queue, string $routingKey): void
+    public function unbindQueue(
+        string $virtualHostName,
+        string $source,
+        string $queue,
+        string $routingKey,
+        ?string $connectionId = null
+    ): void
     {
         if ($source === '') {
             throw new TopologyException(
@@ -490,6 +526,7 @@ final readonly class Broker
         if ($destination === null || $destination->type !== DestinationType::Queue) {
             throw new TopologyException(sprintf('Queue "%s" does not exist.', $queue), TopologyException::NOT_FOUND);
         }
+        $this->assertQueueAccess($virtualHostName, $destination, $connectionId);
 
         if ($this->routingSources()->findByName($virtualHost->id, $source) === null) {
             throw new TopologyException(sprintf('Routing source "%s" does not exist.', $source), TopologyException::NOT_FOUND);
@@ -525,7 +562,43 @@ final readonly class Broker
         $routingSources->deleteGraph($virtualHost->id, $name);
     }
 
-    private function queueDestination(string $virtualHostName, string $queue): Destination
+    public function deleteExclusiveQueuesForConnection(string $connectionId): int
+    {
+        $deleted = 0;
+
+        foreach ($this->exclusiveQueues()->queuesOwnedBy($connectionId) as $owned) {
+            try {
+                $this->deleteQueue($owned['virtual_host'], $owned['queue'], connectionId: $connectionId);
+                $deleted++;
+            } catch (TopologyException $exception) {
+                if ($exception->reason !== TopologyException::NOT_FOUND) {
+                    throw $exception;
+                }
+            } finally {
+                $this->exclusiveQueues()->release($owned['virtual_host'], $owned['queue']);
+            }
+        }
+
+        $this->exclusiveQueues()->releaseByConnection($connectionId);
+
+        return $deleted;
+    }
+
+    public function deletePersistedExclusiveQueues(): int
+    {
+        $deleted = 0;
+
+        foreach ($this->destinations->allExclusiveQueues() as $destination) {
+            $this->destinations->deleteQueueGraph($destination->id);
+            $deleted++;
+        }
+
+        $this->exclusiveQueues()->clear();
+
+        return $deleted;
+    }
+
+    private function queueDestination(string $virtualHostName, string $queue, ?string $connectionId = null): Destination
     {
         $virtualHost = $this->virtualHosts->findByName($virtualHostName);
         if ($virtualHost === null) {
@@ -536,8 +609,37 @@ final readonly class Broker
         if ($destination === null || $destination->type !== DestinationType::Queue) {
             throw new TopologyException(sprintf('Queue "%s" does not exist.', $queue), TopologyException::NOT_FOUND);
         }
+        $this->assertQueueAccess($virtualHostName, $destination, $connectionId);
 
         return $destination;
+    }
+
+    private function assertQueueAccess(string $virtualHostName, Destination $destination, ?string $connectionId): void
+    {
+        if (!$destination->exclusive()) {
+            return;
+        }
+
+        if ($this->exclusiveQueues()->isOwner($virtualHostName, $destination->name, $connectionId)) {
+            return;
+        }
+
+        throw new TopologyException(
+            sprintf('Queue "%s" is exclusive to another connection.', $destination->name),
+            TopologyException::RESOURCE_LOCKED
+        );
+    }
+
+    private function requiredConnectionId(?string $connectionId): string
+    {
+        if ($connectionId === null || $connectionId === '') {
+            throw new TopologyException(
+                'Exclusive queues require a runtime connection owner.',
+                TopologyException::PRECONDITION_FAILED
+            );
+        }
+
+        return $connectionId;
     }
 
     private function bindings(): BindingRepository
@@ -558,5 +660,10 @@ final readonly class Broker
     private function messages(): MessageRepository
     {
         return $this->messages ?? throw new RuntimeException('Broker message repository is not configured.');
+    }
+
+    private function exclusiveQueues(): ExclusiveQueueRegistry
+    {
+        return $this->exclusiveQueues;
     }
 }

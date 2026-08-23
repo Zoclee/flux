@@ -221,6 +221,17 @@ final class AmqpConnection
         foreach (array_keys($this->activeConsumers) as $consumerTag) {
             $this->removeConsumer($consumerTag);
         }
+        if ($this->broker !== null) {
+            try {
+                $this->broker->deleteExclusiveQueuesForConnection($this->runtimeConnection->id);
+            } catch (RuntimeException $exception) {
+                error_log(sprintf(
+                    'AMQP exclusive queue cleanup failed for connection %s: %s',
+                    $this->runtimeConnection->id,
+                    $exception->getMessage()
+                ));
+            }
+        }
 
         if (is_resource($this->socket)) {
             fclose($this->socket);
@@ -542,20 +553,23 @@ final class AmqpConnection
         $reader->skipTable();
         $reader->assertComplete();
 
-        if (!$passive && $exclusive) {
-            throw new TopologyException('Exclusive queues are not supported yet.', TopologyException::NOT_IMPLEMENTED);
-        }
-
         if (!$this->authorizeResource($frame->channel, AuthorizationPermission::Configure, $queue, 50, 10)) {
             return;
         }
 
         if ($passive) {
-            $status = $this->broker()->queueStatus($this->openedVirtualHost(), $queue);
+            $status = $this->broker()->queueStatus($this->openedVirtualHost(), $queue, $this->runtimeConnection->id);
             $destination = $status->destination;
             $messageCount = $status->messageCount;
         } else {
-            $destination = $this->broker()->declareQueue($this->openedVirtualHost(), $queue, $durable, $autoDelete);
+            $destination = $this->broker()->declareQueue(
+                $this->openedVirtualHost(),
+                $queue,
+                $durable,
+                $autoDelete,
+                exclusive: $exclusive,
+                connectionId: $this->runtimeConnection->id
+            );
             $messageCount = $this->broker()->readyMessageCount($destination);
         }
 
@@ -654,7 +668,7 @@ final class AmqpConnection
             return;
         }
 
-        $this->broker()->bindQueue($this->openedVirtualHost(), $exchange, $queue, $routingKey);
+        $this->broker()->bindQueue($this->openedVirtualHost(), $exchange, $queue, $routingKey, $this->runtimeConnection->id);
 
         if (!$noWait) {
             $this->writeFrame(Frame::methodFrame($frame->channel, 50, 21));
@@ -677,7 +691,7 @@ final class AmqpConnection
             return;
         }
 
-        $messageCount = $this->broker()->purgeQueue($this->openedVirtualHost(), $queue);
+        $messageCount = $this->broker()->purgeQueue($this->openedVirtualHost(), $queue, $this->runtimeConnection->id);
         $this->clearUnackedForQueue($queue);
 
         if (!$noWait) {
@@ -704,7 +718,7 @@ final class AmqpConnection
             throw new TopologyException(sprintf('Queue "%s" is in use.', $queue), TopologyException::PRECONDITION_FAILED);
         }
 
-        $messageCount = $this->broker()->deleteQueue($this->openedVirtualHost(), $queue, $ifEmpty);
+        $messageCount = $this->broker()->deleteQueue($this->openedVirtualHost(), $queue, $ifEmpty, $this->runtimeConnection->id);
         $this->removeConsumersForQueue($queue);
         $this->clearUnackedForQueue($queue);
 
@@ -730,7 +744,7 @@ final class AmqpConnection
             return;
         }
 
-        $this->broker()->unbindQueue($this->openedVirtualHost(), $exchange, $queue, $routingKey);
+        $this->broker()->unbindQueue($this->openedVirtualHost(), $exchange, $queue, $routingKey, $this->runtimeConnection->id);
         $this->writeFrame(Frame::methodFrame($frame->channel, 50, 51));
     }
 
@@ -834,7 +848,7 @@ final class AmqpConnection
             return;
         }
 
-        $this->broker()->ensureQueueSubscription($this->openedVirtualHost(), $queue, 'amqp');
+        $this->broker()->ensureQueueSubscription($this->openedVirtualHost(), $queue, 'amqp', $this->runtimeConnection->id);
         $consumer = RuntimeConsumer::create(
             $this->runtimeConnection->id,
             $this->openedVirtualHost(),
@@ -901,14 +915,15 @@ final class AmqpConnection
             return;
         }
 
-        $this->broker()->ensureQueueSubscription($this->openedVirtualHost(), $queue, 'amqp');
+        $this->broker()->ensureQueueSubscription($this->openedVirtualHost(), $queue, 'amqp', $this->runtimeConnection->id);
         $deliveryTag = $this->nextDeliveryTags[$frame->channel] ?? 1;
         $delivery = $this->broker()->reserve(new ReserveRequest(
             $this->openedVirtualHost(),
             $queue,
             'amqp',
             $this->runtimeConnection->id,
-            (string) $deliveryTag
+            (string) $deliveryTag,
+            $this->runtimeConnection->id
         ));
 
         if ($delivery === null) {
@@ -1119,7 +1134,8 @@ final class AmqpConnection
                     $properties['content_encoding'] ?? null,
                     $properties['priority'] ?? 0,
                     ($properties['delivery_mode'] ?? 2) === 2,
-                    $messageId
+                    $messageId,
+                    $this->runtimeConnection->id
                 );
                 $this->sendPublishConfirm($channel);
             } catch (TopologyException $exception) {
@@ -1254,7 +1270,8 @@ final class AmqpConnection
                 $state['queue'],
                 $state['consumer']->subscription,
                 $state['consumer']->id,
-                (string) $deliveryTag
+                (string) $deliveryTag,
+                $this->runtimeConnection->id
             ));
 
             if ($delivery === null) {
@@ -1709,6 +1726,7 @@ final class AmqpConnection
     {
         return match ($exception->reason) {
             TopologyException::NOT_FOUND => 404,
+            TopologyException::RESOURCE_LOCKED => 405,
             TopologyException::NOT_IMPLEMENTED => 540,
             default => 406,
         };

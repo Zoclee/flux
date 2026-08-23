@@ -131,6 +131,29 @@ SQL);
         return (int) $statement->fetchColumn();
     }
 
+    /**
+     * @return list<Destination>
+     */
+    public function allExclusiveQueues(): array
+    {
+        $statement = $this->connection->pdo()->query(<<<'SQL'
+SELECT id, virtual_host_id, name, type, durable, auto_delete, metadata, created_at, updated_at
+FROM destinations
+WHERE type = 'queue'
+  AND metadata @> '{"exclusive": true}'::jsonb
+ORDER BY id
+SQL);
+
+        if ($statement === false) {
+            throw new RuntimeException('Could not read exclusive queues from PostgreSQL.');
+        }
+
+        return array_map(
+            fn (array $row): Destination => $this->mapRow($row),
+            $statement->fetchAll(PDO::FETCH_ASSOC)
+        );
+    }
+
     public function deleteQueueGraph(int $destinationId): int
     {
         return $this->connection->transaction(function (PDO $pdo) use ($destinationId): int {

@@ -13,7 +13,8 @@ final readonly class ReserveRequest
         public string $destination,
         public string $subscription,
         public string $consumerId,
-        public ?string $deliveryTag = null
+        public ?string $deliveryTag = null,
+        public ?string $connectionId = null
     ) {
         if ($this->virtualHost === '') {
             throw new InvalidArgumentException('Virtual host must not be empty.');

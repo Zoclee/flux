@@ -82,6 +82,7 @@ final class AmqpListener implements RuntimeDrainingComponent
 
         stream_set_blocking($server, false);
         $this->server = $server;
+        $this->broker?->deletePersistedExclusiveQueues();
         $localName = stream_socket_get_name($server, false);
         if (is_string($localName) && preg_match('/:(\d+)$/', $localName, $matches) === 1) {
             $this->port = (int) $matches[1];
