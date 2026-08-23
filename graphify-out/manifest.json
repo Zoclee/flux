@@ -414,8 +414,8 @@
     "semantic_hash": "8e92ce23a894a7dd2f491619634dd2e3"
   },
   "src/Console/Commands/ServerStartCommand.php": {
-    "mtime": 1787512945.5386248,
-    "seen": 1787513313.7737815,
+    "mtime": 1787514362.9929378,
+    "seen": 1787514885.3160462,
     "ast_hash": "2bcc4c7976e076fd8911d7c7e95fc334",
     "semantic_hash": "2bcc4c7976e076fd8911d7c7e95fc334"
   },
@@ -582,9 +582,9 @@
     "semantic_hash": "cb6b9d57f362fd27f97fc3068e4352ab"
   },
   "src/Protocol/Amqp/AmqpConnection.php": {
-    "mtime": 1787513637.9758873,
-    "seen": 1787514043.3636754,
-    "ast_hash": "b65031a895b126118d4f184211b1e63e",
+    "mtime": 1787514441.7767074,
+    "seen": 1787514885.3160462,
+    "ast_hash": "d40715ddd1be35333ff64bce38ec818d",
     "semantic_hash": ""
   },
   "src/Protocol/Amqp/AmqpConnectionState.php": {
@@ -834,10 +834,10 @@
     "semantic_hash": ""
   },
   "tests/Integration/Protocol/Amqp/AmqpTopologyTest.php": {
-    "mtime": 1787433274.5750299,
-    "seen": 1787508706.7164986,
-    "ast_hash": "33e8e6b7d9ab904d5a577ce5434e3ea3",
-    "semantic_hash": "33e8e6b7d9ab904d5a577ce5434e3ea3"
+    "mtime": 1787514542.0299895,
+    "seen": 1787514885.3160462,
+    "ast_hash": "e1fcdff97e20bc1d66c64a10dea64826",
+    "semantic_hash": ""
   },
   "tests/Integration/Runtime/BrokerRuntimeIntegrationTest.php": {
     "mtime": 1787420109.200873,

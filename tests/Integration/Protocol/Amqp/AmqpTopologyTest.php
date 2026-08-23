@@ -687,6 +687,28 @@ final class AmqpTopologyTest extends TestCase
         }
     }
 
+    public function testQueueDeleteForMissingQueueIsIdempotent(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $codec = new FrameCodec();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 40, $this->queueDelete('missing'))));
+            $deleteOk = $this->readMethodFrame($listener, $client);
+
+            self::assertSame([50, 41], $deleteOk->method());
+            self::assertSame(1, $deleteOk->channel);
+            self::assertSame(0, $this->messageCount($deleteOk));
+
+            fwrite($client, $codec->encode(Frame::methodFrame(1, 50, 10, $this->queueDeclare('after.missing.delete', false))));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testQueueDeleteIfEmptyRejectsNonEmptyQueue(): void
     {
         $orders = $this->broker()->declareQueue('/', 'orders', true, false);

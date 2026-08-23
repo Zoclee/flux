@@ -740,7 +740,20 @@ final class AmqpConnection
             throw new TopologyException(sprintf('Queue "%s" is in use.', $queue), TopologyException::PRECONDITION_FAILED);
         }
 
-        $this->broker()->assertQueueDeletable($virtualHost, $queue, $ifEmpty, $this->runtimeConnection->id);
+        try {
+            $this->broker()->assertQueueDeletable($virtualHost, $queue, $ifEmpty, $this->runtimeConnection->id);
+        } catch (TopologyException $exception) {
+            if ($exception->reason !== TopologyException::NOT_FOUND) {
+                throw $exception;
+            }
+
+            if (!$noWait) {
+                $this->writeFrame(Frame::methodFrame($frame->channel, 50, 41, pack('N', 0)));
+            }
+
+            return;
+        }
+
         $this->notifyQueueDeleted($virtualHost, $queue);
         $messageCount = $this->broker()->deleteQueue($virtualHost, $queue, $ifEmpty, $this->runtimeConnection->id);
 
