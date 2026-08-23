@@ -988,20 +988,22 @@ final class AmqpConnection
         $deliveryTag = $reader->readLongLong();
         $bits = $reader->readOctet();
         $reader->assertComplete();
+        $multiple = ($bits & 0b00000001) !== 0;
 
-        if (($bits & 0b00000001) !== 0) {
-            $this->sendChannelError($frame->channel, 540, 'NOT_IMPLEMENTED - basic.ack multiple=true is not supported', 60, 80);
-            return;
-        }
-
-        $mapping = $this->unackedDeliveries[$frame->channel][$deliveryTag] ?? null;
-        if ($mapping === null) {
+        $settlements = $this->settlementsForDeliveryTag($frame->channel, $deliveryTag, $multiple);
+        if ($settlements === []) {
             $this->sendChannelError($frame->channel, 406, 'PRECONDITION_FAILED - unknown delivery tag', 60, 80);
             return;
         }
 
-        $this->broker()->acknowledge(new AcknowledgeRequest($mapping['delivery']->id));
-        $this->forgetUnackedDelivery($frame->channel, $deliveryTag);
+        foreach ($settlements as $mapping) {
+            $this->broker()->acknowledge(new AcknowledgeRequest($mapping['delivery']->id));
+        }
+
+        foreach (array_keys($settlements) as $settledDeliveryTag) {
+            $this->forgetUnackedDelivery($frame->channel, (int) $settledDeliveryTag);
+        }
+
         $this->scheduleConsumerDelivery();
     }
 
@@ -1034,26 +1036,68 @@ final class AmqpConnection
         $deliveryTag = $reader->readLongLong();
         $bits = $reader->readOctet();
         $reader->assertComplete();
+        $multiple = ($bits & 0b00000001) !== 0;
 
-        if (($bits & 0b00000001) !== 0) {
-            $this->sendChannelError($frame->channel, 540, 'NOT_IMPLEMENTED - basic.nack multiple=true is not supported', 60, 120);
-            return;
-        }
-
-        $mapping = $this->unackedDeliveries[$frame->channel][$deliveryTag] ?? null;
-        if ($mapping === null) {
+        $settlements = $this->settlementsForDeliveryTag($frame->channel, $deliveryTag, $multiple);
+        if ($settlements === []) {
             $this->sendChannelError($frame->channel, 406, 'PRECONDITION_FAILED - unknown delivery tag', 60, 120);
             return;
         }
 
-        if (($bits & 0b00000010) !== 0) {
-            $this->broker()->release(new ReleaseRequest($mapping['delivery']->id));
-        } else {
-            $this->broker()->reject(new RejectRequest($mapping['delivery']->id));
+        foreach ($settlements as $mapping) {
+            if (($bits & 0b00000010) !== 0) {
+                $this->broker()->release(new ReleaseRequest($mapping['delivery']->id));
+            } else {
+                $this->broker()->reject(new RejectRequest($mapping['delivery']->id));
+            }
         }
 
-        $this->forgetUnackedDelivery($frame->channel, $deliveryTag);
+        foreach (array_keys($settlements) as $settledDeliveryTag) {
+            $this->forgetUnackedDelivery($frame->channel, (int) $settledDeliveryTag);
+        }
+
         $this->scheduleConsumerDelivery();
+    }
+
+    /**
+     * @return array<int, array{delivery: Delivery, consumer_tag: string, queue: string}>
+     */
+    private function settlementsForDeliveryTag(int $channel, int $deliveryTag, bool $multiple): array
+    {
+        if (!$multiple) {
+            if ($deliveryTag === 0) {
+                return [];
+            }
+
+            $mapping = $this->unackedDeliveries[$channel][$deliveryTag] ?? null;
+
+            return $mapping === null ? [] : [$deliveryTag => $mapping];
+        }
+
+        $deliveries = $this->unackedDeliveries[$channel] ?? [];
+        if ($deliveries === []) {
+            return [];
+        }
+
+        if ($deliveryTag === 0) {
+            ksort($deliveries);
+
+            return $deliveries;
+        }
+
+        if (!isset($deliveries[$deliveryTag])) {
+            return [];
+        }
+
+        $settlements = [];
+        foreach ($deliveries as $outstandingDeliveryTag => $mapping) {
+            if ($outstandingDeliveryTag <= $deliveryTag) {
+                $settlements[$outstandingDeliveryTag] = $mapping;
+            }
+        }
+        ksort($settlements);
+
+        return $settlements;
     }
 
     private function handleContentFrame(Frame $frame): void

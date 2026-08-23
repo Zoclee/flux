@@ -1043,6 +1043,279 @@ final class AmqpPublishConsumeTest extends TestCase
         }
     }
 
+    public function testBasicAckMultipleAcknowledgesCumulativeBasicGetDeliveries(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two', 'three', 'four', 'five']);
+
+            $tags = [];
+            for ($i = 0; $i < 3; $i++) {
+                [$tag, $redelivered, $body] = $this->readBasicGetDelivery($listener, $client, 'orders');
+                $tags[] = $tag;
+                self::assertFalse($redelivered);
+                self::assertSame(['one', 'two', 'three'][$i], $body);
+            }
+
+            self::assertSame([1, 2, 3], $tags);
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong(3) . "\x01");
+            $listener->tick();
+            self::assertSame(0, $listener->inFlightCount());
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders', passive: true));
+            $declareOk = $this->readMethodFrame($listener, $client);
+            self::assertSame([50, 11], $declareOk->method());
+            self::assertSame(2, $this->queueDeclareMessageCount($declareOk));
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('orders', noAck: true));
+            $next = $this->readMethodFrame($listener, $client);
+            self::assertSame([60, 71], $next->method());
+            self::assertSame(4, $this->deliveryTagFromBasicGetOk($next));
+            $this->readFrame($listener, $client);
+            self::assertSame('four', $this->readFrame($listener, $client)->payload);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(
+            [
+                DeliveryState::Acknowledged,
+                DeliveryState::Acknowledged,
+                DeliveryState::Acknowledged,
+                DeliveryState::Acknowledged,
+                DeliveryState::Pending,
+            ],
+            $this->deliveryStates('orders')
+        );
+    }
+
+    public function testBasicAckMultipleZeroAcknowledgesAllOutstandingAndFreesPrefetch(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two']);
+            $this->sendMethod($client, 1, 60, 10, $this->basicQos(0, 1, false));
+            self::assertSame([60, 11], $this->readMethod($listener, $client));
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('orders', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            [$firstTag, $firstBody] = $this->readDelivery($listener, $client);
+            self::assertSame(1, $firstTag);
+            self::assertSame('one', $firstBody);
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong(0) . "\x01");
+            [$secondTag, $secondBody] = $this->readDelivery($listener, $client);
+            self::assertSame(2, $secondTag);
+            self::assertSame('two', $secondBody);
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong($secondTag) . "\x00");
+            $listener->tick();
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame([DeliveryState::Acknowledged, DeliveryState::Acknowledged], $this->deliveryStates('orders'));
+    }
+
+    public function testBasicAckMultipleKeepsHigherTagsOutstandingAndDoesNotResettleRemovedTags(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two', 'three', 'four']);
+
+            for ($i = 0; $i < 4; $i++) {
+                $this->readBasicGetDelivery($listener, $client, 'orders');
+            }
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong(2) . "\x01");
+            $listener->tick();
+            self::assertSame(
+                [DeliveryState::Acknowledged, DeliveryState::Acknowledged, DeliveryState::Reserved, DeliveryState::Reserved],
+                $this->deliveryStates('orders')
+            );
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong(4) . "\x01");
+            $listener->tick();
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(
+            [DeliveryState::Acknowledged, DeliveryState::Acknowledged, DeliveryState::Acknowledged, DeliveryState::Acknowledged],
+            $this->deliveryStates('orders')
+        );
+    }
+
+    public function testBasicNackMultipleWithRequeueReleasesAllAffectedDeliveriesForRedelivery(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two', 'three']);
+
+            for ($i = 0; $i < 3; $i++) {
+                $this->readBasicGetDelivery($listener, $client, 'orders');
+            }
+
+            $this->sendMethod($client, 1, 60, 120, $this->basicNack(3, true, true));
+            $listener->tick();
+            self::assertSame(0, $listener->inFlightCount());
+
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('orders', passive: true));
+            $declareOk = $this->readMethodFrame($listener, $client);
+            self::assertSame([50, 11], $declareOk->method());
+            self::assertSame(3, $this->queueDeclareMessageCount($declareOk));
+
+            foreach (['one', 'two', 'three'] as $expectedBody) {
+                [$tag, $redelivered, $body] = $this->readBasicGetDelivery($listener, $client, 'orders', noAck: true);
+                self::assertGreaterThan(3, $tag);
+                self::assertTrue($redelivered);
+                self::assertSame($expectedBody, $body);
+            }
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame([DeliveryState::Acknowledged, DeliveryState::Acknowledged, DeliveryState::Acknowledged], $this->deliveryStates('orders'));
+    }
+
+    public function testBasicNackMultipleWithRejectRejectsAllAffectedDeliveries(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two', 'three']);
+
+            for ($i = 0; $i < 3; $i++) {
+                $this->readBasicGetDelivery($listener, $client, 'orders');
+            }
+
+            $this->sendMethod($client, 1, 60, 120, $this->basicNack(3, true, false));
+            $listener->tick();
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('orders'));
+            self::assertSame([60, 72], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame([DeliveryState::Rejected, DeliveryState::Rejected, DeliveryState::Rejected], $this->deliveryStates('orders'));
+    }
+
+    public function testCumulativeDeliveryTagsAreChannelLocal(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 2, 20, 10, "\x00");
+            self::assertSame([20, 11], $this->readMethod($listener, $client));
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two']);
+
+            [$channelOneTag] = $this->readBasicGetDelivery($listener, $client, 'orders', channel: 1);
+            [$channelTwoTag] = $this->readBasicGetDelivery($listener, $client, 'orders', channel: 2);
+            self::assertSame(1, $channelOneTag);
+            self::assertSame(1, $channelTwoTag);
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong(1) . "\x01");
+            $listener->tick();
+            self::assertSame([DeliveryState::Acknowledged, DeliveryState::Reserved], $this->deliveryStates('orders'));
+
+            $this->sendMethod($client, 2, 60, 80, $this->packLongLong(1) . "\x01");
+            $listener->tick();
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame([DeliveryState::Acknowledged, DeliveryState::Acknowledged], $this->deliveryStates('orders'));
+    }
+
+    public function testInvalidCumulativeAckTagClosesChannelWithPreconditionFailed(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['one', 'two']);
+            $this->readBasicGetDelivery($listener, $client, 'orders');
+            $this->readBasicGetDelivery($listener, $client, 'orders');
+
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong(3) . "\x01");
+            $close = $this->readMethodFrame($listener, $client);
+            self::assertSame([20, 40], $close->method());
+            self::assertSame(406, $this->replyCode($close));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame([DeliveryState::Pending, DeliveryState::Pending], $this->deliveryStates('orders'));
+    }
+
+    public function testCumulativeAckNackEndToEndRegression(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->declareQueueAndPublishBodies($listener, $client, 'orders', ['a1', 'a2', 'a3', 'ready-1', 'ready-2']);
+
+            for ($i = 0; $i < 3; $i++) {
+                $this->readBasicGetDelivery($listener, $client, 'orders');
+            }
+            $this->sendMethod($client, 1, 60, 80, $this->packLongLong(3) . "\x01");
+            $listener->tick();
+            $this->assertReadyMessageCount($listener, $client, 'orders', 2);
+
+            $this->declareQueueAndPublishBodies($listener, $client, 'requeue.orders', ['r1', 'r2', 'r3']);
+            $latestTag = 0;
+            for ($i = 0; $i < 3; $i++) {
+                [$latestTag] = $this->readBasicGetDelivery($listener, $client, 'requeue.orders');
+            }
+            $this->sendMethod($client, 1, 60, 120, $this->basicNack($latestTag, true, true));
+            $listener->tick();
+            $this->assertReadyMessageCount($listener, $client, 'requeue.orders', 3);
+            foreach (['r1', 'r2', 'r3'] as $body) {
+                [, $redelivered, $redeliveredBody] = $this->readBasicGetDelivery($listener, $client, 'requeue.orders', noAck: true);
+                self::assertTrue($redelivered);
+                self::assertSame($body, $redeliveredBody);
+            }
+
+            $this->declareQueueAndPublishBodies($listener, $client, 'reject.orders', ['x1', 'x2', 'x3']);
+            $latestTag = 0;
+            for ($i = 0; $i < 3; $i++) {
+                [$latestTag] = $this->readBasicGetDelivery($listener, $client, 'reject.orders');
+            }
+            $this->sendMethod($client, 1, 60, 120, $this->basicNack($latestTag, true, false));
+            $listener->tick();
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('reject.orders'));
+            self::assertSame([60, 72], $this->readMethod($listener, $client));
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        self::assertSame(
+            [DeliveryState::Acknowledged, DeliveryState::Acknowledged, DeliveryState::Acknowledged, DeliveryState::Pending, DeliveryState::Pending],
+            $this->deliveryStates('orders')
+        );
+        self::assertSame([DeliveryState::Acknowledged, DeliveryState::Acknowledged, DeliveryState::Acknowledged], $this->deliveryStates('requeue.orders'));
+        self::assertSame([DeliveryState::Rejected, DeliveryState::Rejected, DeliveryState::Rejected], $this->deliveryStates('reject.orders'));
+    }
+
     public function testBasicGetEmptyWhenNoMessageIsAvailable(): void
     {
         [$listener, $client] = $this->startedListener();
@@ -2822,7 +3095,7 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame(0, $connections->count());
     }
 
-    public function testNackMultipleTrueIsRejected(): void
+    public function testNackMultipleTrueSettlesMatchingOutstandingDelivery(): void
     {
         [$listener, $client] = $this->startedListener();
 
@@ -2837,14 +3110,14 @@ final class AmqpPublishConsumeTest extends TestCase
             $this->readFrame($listener, $client);
 
             $this->sendMethod($client, 1, 60, 120, $this->basicNack($deliveryTag, true, false));
-
-            self::assertSame([20, 40], $this->readMethod($listener, $client));
+            $listener->tick();
+            self::assertSame(0, $listener->inFlightCount());
         } finally {
             fclose($client);
             $listener->stop();
         }
 
-        self::assertSame(DeliveryState::Pending, $this->singleDelivery('orders')->state);
+        self::assertSame(DeliveryState::Rejected, $this->singleDelivery('orders')->state);
     }
 
     public function testMultipleChannelsKeepPrefetchLimitsSeparate(): void
@@ -3370,6 +3643,38 @@ final class AmqpPublishConsumeTest extends TestCase
 
     /**
      * @param resource $client
+     * @return array{0: int, 1: bool, 2: string}
+     */
+    private function readBasicGetDelivery(
+        AmqpListener $listener,
+        mixed $client,
+        string $queue,
+        bool $noAck = false,
+        int $channel = 1
+    ): array {
+        $this->sendMethod($client, $channel, 60, 70, $this->basicGet($queue, $noAck));
+        $getOk = $this->readMethodFrame($listener, $client);
+        self::assertSame([60, 71], $getOk->method());
+        $deliveryTag = $this->deliveryTagFromBasicGetOk($getOk);
+        $redelivered = $this->redeliveredFromBasicGetOk($getOk);
+        $this->readFrame($listener, $client);
+
+        return [$deliveryTag, $redelivered, $this->readFrame($listener, $client)->payload];
+    }
+
+    /**
+     * @param resource $client
+     */
+    private function assertReadyMessageCount(AmqpListener $listener, mixed $client, string $queue, int $expected): void
+    {
+        $this->sendMethod($client, 1, 50, 10, $this->queueDeclare($queue, passive: true));
+        $declareOk = $this->readMethodFrame($listener, $client);
+        self::assertSame([50, 11], $declareOk->method());
+        self::assertSame($expected, $this->queueDeclareMessageCount($declareOk));
+    }
+
+    /**
+     * @param resource $client
      * @return list<string>
      */
     private function readUntilCancelOk(AmqpListener $listener, mixed $client): array
@@ -3515,6 +3820,14 @@ final class AmqpPublishConsumeTest extends TestCase
         $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
 
         return $reader->readLongLong();
+    }
+
+    private function redeliveredFromBasicGetOk(Frame $frame): bool
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader(substr($frame->payload, 4));
+        $reader->readLongLong();
+
+        return ($reader->readOctet() & 0b00000001) !== 0;
     }
 
     private function queueDeclareMessageCount(Frame $frame): int
