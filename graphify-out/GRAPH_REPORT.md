@@ -1,15 +1,16 @@
 # Graph Report - flux  (2026-08-23)
 
 ## Corpus Check
-- cluster-only mode — file stats not available
+- 163 files · ~62,236 words
+- Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1633 nodes · 5067 edges · 91 communities (38 shown, 53 thin omitted)
+- 1655 nodes · 5088 edges · 94 communities (36 shown, 58 thin omitted)
 - Extraction: 98% EXTRACTED · 2% INFERRED · 0% AMBIGUOUS · INFERRED: 104 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `fa6fc752`
+- Built from commit: `d182acb4`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -94,7 +95,10 @@
 - UserSetPermissionsCommand
 - VhostCreateCommand
 - VhostListCommand
+- SubscriptionNotFoundException
+- SubscriptionListCommand
 - 20260820_120000_create_schema_migrations.sql
+- ConnectionConfigTest
 
 ## God Nodes (most connected - your core abstractions)
 1. `AmqpPublishConsumeTest` - 163 edges
@@ -123,67 +127,59 @@
 ## Import Cycles
 - None detected.
 
-## Communities (91 total, 53 thin omitted)
+## Communities (94 total, 58 thin omitted)
 
 ### Community 1 - "AmqpConnection"
 Cohesion: 0.06
-Nodes (9): AmqpConnectionState, Flux\Broker\AuthenticationService, Flux\Broker\AuthorizationPermission, Flux\Broker\AuthorizationService, Flux\Runtime\RuntimeComponent, TopologyException, AmqpConnection, AuthorizationPermission (+1 more)
+Nodes (10): AmqpConnectionState, Flux\Broker\AuthenticationService, Flux\Broker\AuthorizationPermission, Flux\Broker\AuthorizationService, Flux\Protocol\Amqp\AmqpConnectionState, TopologyException, AmqpConnection, AuthorizationPermission (+2 more)
 
 ### Community 2 - "Frame"
-Cohesion: 0.09
-Nodes (5): Frame, self, FrameCodec, AmqpTopologyTest, FrameCodecTest
+Cohesion: 0.11
+Nodes (4): Frame, self, AmqpTopologyTest, FrameCodecTest
 
 ### Community 3 - "ConnectionConfig"
 Cohesion: 0.09
 Nodes (8): RuntimeDiagnostics, Application, DbStatusCommand, MigrateCommand, self, ConnectionConfig, self, RuntimeDiagnosticsClient
 
 ### Community 4 - "AmqpListener"
-Cohesion: 0.09
-Nodes (3): AmqpListener, AmqpTlsConfig, AmqpListenerTest
+Cohesion: 0.07
+Nodes (6): Flux\Runtime\RuntimeComponent, Flux\Runtime\RuntimeDrainingComponent, AmqpListener, AmqpTlsConfig, AmqpListenerTest, RecordingRuntimeComponent
 
 ### Community 5 - "RuntimeException"
-Cohesion: 0.05
-Nodes (14): Flux\Runtime\RuntimeDiagnostics, RuntimeException, DestinationNotFoundException, self, self, SubscriptionNotFoundException, HealthCommand, ReadinessCommand (+6 more)
+Cohesion: 0.07
+Nodes (8): Flux\Runtime\RuntimeDiagnostics, ConnectionListCommand, HealthCommand, ReadinessCommand, AvailableRuntimeDiagnostics, UnavailableRuntimeDiagnostics, ReadyRuntimeDiagnostics, FakeRuntimeDiagnostics
 
 ### Community 6 - "BindingRepository"
 Cohesion: 0.06
 Nodes (4): Binding, BindingRepository, BrokerPublishTest, BindingRepositoryTest
 
 ### Community 7 - "Connection"
-Cohesion: 0.15
-Nodes (6): Flux\Broker\RoutingSourceType, PDO, PHPUnit\Framework\TestCase, PublishRequest, ResourceLimitException, Connection
-
-### Community 8 - "Application.php"
-Cohesion: 0.13
-Nodes (5): Flux\Broker\DeliveryState, self, RetryPolicy, MigrationFailure, Throwable
+Cohesion: 0.27
+Nodes (3): PDO, PHPUnit\Framework\TestCase, Connection
 
 ### Community 9 - "DeliveryRepository"
-Cohesion: 0.18
-Nodes (7): Delivery, DeliveryState, DeliveryRepository, DeliveryState, PDO, DeliveryStateException, self
+Cohesion: 0.08
+Nodes (13): AcknowledgeRequest, Delivery, DeliveryState, RejectRequest, ReserveRequest, self, RetryPolicy, DeliveryRepository (+5 more)
 
 ### Community 12 - "Broker"
-Cohesion: 0.17
+Cohesion: 0.18
 Nodes (3): Broker, self, VirtualHostNotFoundException
 
 ### Community 16 - "UserRepository"
-Cohesion: 0.12
-Nodes (6): AuthenticationService, AuthorizationService, Authenticator, Authorizer, User, UserRepository
+Cohesion: 0.15
+Nodes (4): AuthorizationService, Authorizer, User, UserRepository
 
 ### Community 17 - "DateTimeImmutable"
-Cohesion: 0.14
-Nodes (4): DateTimeImmutable, Flux\Runtime\RuntimeState, ReleaseRequest, RuntimeRegistrationException
+Cohesion: 0.10
+Nodes (9): Closure, Flux\Broker\DeliveryState, Flux\Broker\RoutingSourceType, Flux\Runtime\RuntimeState, RuntimeException, DestinationNotFoundException, self, PublishRequest (+1 more)
 
 ### Community 18 - "composer.json"
 Cohesion: 0.08
 Nodes (24): autoload, autoload-dev, psr-4, psr-4, bin, config, sort-packages, description (+16 more)
 
 ### Community 20 - "DestinationRepository"
-Cohesion: 0.13
-Nodes (6): Flux\Broker\DestinationType, Destination, DestinationType, QueueStatus, DestinationRepository, DestinationType
-
-### Community 21 - "BrokerRuntimeTest"
-Cohesion: 0.15
-Nodes (3): Flux\Runtime\RuntimeDrainingComponent, BrokerRuntimeTest, RecordingDrainingComponent
+Cohesion: 0.17
+Nodes (5): Flux\Broker\DestinationType, Destination, DestinationType, DestinationRepository, DestinationType
 
 ### Community 23 - "virtual_hosts"
 Cohesion: 0.11
@@ -191,31 +187,35 @@ Nodes (11): virtual_hosts, destinations, bindings, messages, message_routes, sub
 
 ### Community 24 - "AuthenticatedUser"
 Cohesion: 0.13
-Nodes (8): Flux\Protocol\Amqp\AmqpConnectionState, AuthenticatedUser, AuthenticationResult, self, authenticate(), canAccessVirtualHost(), ListenerAuthenticationService, InMemoryAuthenticationService
+Nodes (7): AuthenticatedUser, AuthenticationResult, self, authenticate(), canAccessVirtualHost(), ListenerAuthenticationService, InMemoryAuthenticationService
 
 ### Community 25 - "Migrator"
 Cohesion: 0.15
 Nodes (4): SplFileInfo, MigrationResult, Migrator, MigrationFilenameTest
 
 ### Community 26 - "AcknowledgeRequest"
-Cohesion: 0.12
-Nodes (4): AcknowledgeRequest, RejectRequest, ReserveRequest, DeliveryRequestTest
+Cohesion: 0.09
+Nodes (20): Architecture, Broker, CLI, Console, Core Philosophy, Dependencies, Documentation, graphify (+12 more)
 
 ### Community 27 - "VirtualHostRepository"
-Cohesion: 0.14
+Cohesion: 0.15
 Nodes (3): VirtualHost, VirtualHostRepository, VirtualHostRepositoryTest
 
+### Community 29 - "SubscriptionRepositoryTest"
+Cohesion: 0.09
+Nodes (3): Subscription, SubscriptionRepository, SubscriptionRepositoryTest
+
 ### Community 36 - "ResourceLimits"
-Cohesion: 0.15
+Cohesion: 0.17
 Nodes (4): Closure, self, ResourceLimits, ResourceLimitsTest
+
+### Community 37 - "MessageRouteRepository"
+Cohesion: 0.13
+Nodes (5): DateTimeImmutable, MessageRoute, ReleaseRequest, MessageRouteRepository, RuntimeRegistrationException
 
 ### Community 38 - "Uuid"
 Cohesion: 0.18
 Nodes (4): self, self, Uuid, UuidTest
-
-### Community 42 - "ReadOnlyDatabaseContext"
-Cohesion: 0.23
-Nodes (3): BindingListCommand, ReadOnlyDatabaseContext, SubscriptionListCommand
 
 ### Community 46 - "AuthorizationResult"
 Cohesion: 0.20
@@ -233,29 +233,25 @@ Nodes (3): RuntimeConnection, RuntimeConsumer, RuntimeModelTest
 Cohesion: 0.40
 Nodes (3): RoutingSourceType, RoutingSourceType, RoutingSource
 
-### Community 66 - "UserCreateCommand"
-Cohesion: 0.36
-Nodes (3): Closure, Closure, UserCreateCommand
-
 ## Knowledge Gaps
-- **16 isolated node(s):** `sort-packages`, `description`, `license`, `minimum-stability`, `name` (+11 more)
+- **35 isolated node(s):** `Project Context`, `Core Philosophy`, `PHP`, `Dependencies`, `Broker` (+30 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **53 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **58 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Connection` connect `Connection` to `AmqpPublishConsumeTest`, `Frame`, `ConnectionConfig`, `RuntimeException`, `BindingRepository`, `Application.php`, `DeliveryRepository`, `SchemaTest`, `PublishTransactionTest`, `BrokerTopologyManagementTest`, `DeliveryRepositoryTest`, `UserRepository`, `DateTimeImmutable`, `BrokerDeliveryTest`, `DestinationRepository`, `AdminCommandTest`, `Migrator`, `VirtualHostRepository`, `UserRepositoryTest`, `SubscriptionRepositoryTest`, `MessageRepository`, `SubscriptionRepository`, `MessageRepositoryTest`, `MessageRouteRepositoryTest`, `ResourceLimits`, `MessageRouteRepository`, `BrokerRuntimeIntegrationTest`, `ConnectionTest`, `ReadOnlyDatabaseContext`, `RoutingSourceRepository`, `DestinationRepositoryTest`, `PublishTransaction`, `ReadinessCommandTest`, `.createRuntime`, `UserCreateCommand`, `UserClearPermissionsCommand`, `UserGrantVhostCommand`, `UserListCommand`, `UserListPermissionsCommand`, `UserListVhostsCommand`, `UserSetPermissionsCommand`, `VhostCreateCommand`?**
-  _High betweenness centrality (0.257) - this node is a cross-community bridge._
-- **Why does `AmqpPublishConsumeTest` connect `AmqpPublishConsumeTest` to `Connection`?**
-  _High betweenness centrality (0.116) - this node is a cross-community bridge._
-- **Why does `AmqpConnection` connect `AmqpConnection` to `Frame`, `ResourceLimits`, `Connection`, `AmqpConnectionTest`, `Broker`, `RuntimeConnection`, `DateTimeImmutable`, `ConsumerRegistry`, `AuthenticatedUser`, `ConnectionRegistry`?**
-  _High betweenness centrality (0.102) - this node is a cross-community bridge._
+- **Why does `Connection` connect `Connection` to `AmqpPublishConsumeTest`, `Frame`, `ConnectionConfig`, `RuntimeException`, `BindingRepository`, `Application.php`, `DeliveryRepository`, `SchemaTest`, `PublishTransactionTest`, `BrokerTopologyManagementTest`, `DeliveryRepositoryTest`, `UserRepository`, `DateTimeImmutable`, `BrokerDeliveryTest`, `DestinationRepository`, `AdminCommandTest`, `Migrator`, `VirtualHostRepository`, `UserRepositoryTest`, `SubscriptionRepositoryTest`, `MessageRepository`, `MessageRepositoryTest`, `MessageRouteRepositoryTest`, `ResourceLimits`, `MessageRouteRepository`, `BrokerRuntimeIntegrationTest`, `ConnectionTest`, `ReadOnlyDatabaseContext`, `RoutingSourceRepository`, `DestinationRepositoryTest`, `PublishTransaction`, `ReadinessCommandTest`, `.createRuntime`, `UserCreateCommand`, `UserClearPermissionsCommand`, `UserGrantVhostCommand`, `UserListCommand`, `UserListPermissionsCommand`, `UserListVhostsCommand`, `UserSetPermissionsCommand`, `VhostCreateCommand`?**
+  _High betweenness centrality (0.222) - this node is a cross-community bridge._
+- **Why does `AmqpPublishConsumeTest` connect `AmqpPublishConsumeTest` to `DateTimeImmutable`, `Connection`?**
+  _High betweenness centrality (0.131) - this node is a cross-community bridge._
+- **Why does `AmqpConnection` connect `AmqpConnection` to `ResourceLimits`, `AmqpConnectionTest`, `Broker`, `RuntimeConnection`, `DateTimeImmutable`, `ConsumerRegistry`, `AuthenticatedUser`, `ConnectionRegistry`?**
+  _High betweenness centrality (0.100) - this node is a cross-community bridge._
 - **Are the 18 inferred relationships involving `Frame` (e.g. with `.completeHandshake()` and `.testChannelCanOpenAndCloseAfterConnectionHandshake()`) actually correct?**
   _`Frame` has 18 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 12 inferred relationships involving `Connection` (e.g. with `.userClearPermissions()` and `.userCreate()`) actually correct?**
   _`Connection` has 12 INFERRED edges - model-reasoned connections that need verification._
-- **What connects `sort-packages`, `description`, `license` to the rest of the system?**
-  _16 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **What connects `Project Context`, `Core Philosophy`, `PHP` to the rest of the system?**
+  _35 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `AmqpPublishConsumeTest` be split into smaller, more focused modules?**
   _Cohesion score 0.09198113207547169 - nodes in this community are weakly interconnected._
