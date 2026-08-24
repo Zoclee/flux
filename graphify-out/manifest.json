@@ -982,5 +982,11 @@
     "seen": 1787588333.8515263,
     "ast_hash": "3860328a4fbf96e7919d37ee713e2ecf",
     "semantic_hash": ""
+  },
+  "CHANGELOG.md": {
+    "mtime": 1787596199.890213,
+    "seen": 1787596234.603547,
+    "ast_hash": "10b048df3ddfc1994c260804c697058b",
+    "semantic_hash": ""
   }
 }
