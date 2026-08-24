@@ -102,10 +102,10 @@
     "semantic_hash": "c9bf0d9bccdc9231024bcad38194ed03"
   },
   "flux": {
-    "mtime": 1787254182.356398,
-    "seen": 1787508706.7164986,
-    "ast_hash": "0546d6d67955acf12b9d9472be0516f3",
-    "semantic_hash": "0546d6d67955acf12b9d9472be0516f3"
+    "mtime": 1787598650.6354895,
+    "seen": 1787599362.5079236,
+    "ast_hash": "98d31ee85200c688f0d5a79bb8da62b2",
+    "semantic_hash": ""
   },
   "src/Broker/AcknowledgeRequest.php": {
     "mtime": 1787340310.9510944,
@@ -876,10 +876,10 @@
     "semantic_hash": "7b159aa8250ea893dd6cfa467adfe282"
   },
   "tests/Unit/Console/ApplicationTest.php": {
-    "mtime": 1787435102.0037763,
-    "seen": 1787508706.7164986,
-    "ast_hash": "77982864135479d254782f525deffc0f",
-    "semantic_hash": "77982864135479d254782f525deffc0f"
+    "mtime": 1787598717.2703125,
+    "seen": 1787599362.5079236,
+    "ast_hash": "0b304d57c33c3217b0c6a4080ea8ab4e",
+    "semantic_hash": ""
   },
   "tests/Unit/Console/DiagnosticsCommandTest.php": {
     "mtime": 1787418895.6034591,

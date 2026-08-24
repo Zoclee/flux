@@ -47,6 +47,47 @@ final class ApplicationTest extends TestCase
         self::assertFileDoesNotExist($projectRoot . '/bin' . DIRECTORY_SEPARATOR . 'flux');
     }
 
+    public function testRootCliEntryPointUsesRepositoryAutoloaderFirst(): void
+    {
+        $layout = $this->createCliBootstrapLayout();
+
+        mkdir($layout . '/vendor', 0777, true);
+        file_put_contents($layout . '/vendor/autoload.php', $this->fakeAutoloader('repository', 17));
+
+        mkdir($layout . '/parent', 0777, true);
+        file_put_contents($layout . '/parent/autoload.php', $this->fakeAutoloader('parent', 19));
+
+        [$exitCode, $stdout, $stderr] = $this->runCliBootstrap($layout . '/flux');
+
+        self::assertSame(17, $exitCode);
+        self::assertSame("repository\n", $stdout);
+        self::assertSame('', $stderr);
+    }
+
+    public function testRootCliEntryPointFallsBackToComposerDependencyAutoloader(): void
+    {
+        $layout = $this->createCliBootstrapLayout('vendor/zoclee/flux');
+
+        file_put_contents(dirname($layout, 2) . '/autoload.php', $this->fakeAutoloader('composer', 23));
+
+        [$exitCode, $stdout, $stderr] = $this->runCliBootstrap($layout . '/flux');
+
+        self::assertSame(23, $exitCode);
+        self::assertSame("composer\n", $stdout);
+        self::assertSame('', $stderr);
+    }
+
+    public function testRootCliEntryPointReportsMissingAutoloader(): void
+    {
+        $layout = $this->createCliBootstrapLayout();
+
+        [$exitCode, $stdout, $stderr] = $this->runCliBootstrap($layout . '/flux');
+
+        self::assertSame(1, $exitCode);
+        self::assertSame('', $stdout);
+        self::assertStringContainsString("Flux could not find Composer's autoloader.", $stderr);
+    }
+
     /**
      * @param list<string> $argv
      * @return array{0: int, 1: string}
@@ -66,5 +107,68 @@ final class ApplicationTest extends TestCase
         self::assertIsString($output);
 
         return [$exitCode, $output];
+    }
+
+    private function createCliBootstrapLayout(string $relativePath = ''): string
+    {
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'flux-cli-bootstrap-' . bin2hex(random_bytes(8));
+        $layout = $relativePath === '' ? $root : $root . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $relativePath);
+
+        mkdir($layout, 0777, true);
+        copy(dirname(__DIR__, 3) . '/flux', $layout . '/flux');
+
+        return $layout;
+    }
+
+    /**
+     * @return array{0: int, 1: string, 2: string}
+     */
+    private function runCliBootstrap(string $script): array
+    {
+        $process = proc_open(
+            [PHP_BINARY, $script],
+            [
+                1 => ['pipe', 'w'],
+                2 => ['pipe', 'w'],
+            ],
+            $pipes,
+        );
+
+        self::assertIsResource($process);
+
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+
+        $exitCode = proc_close($process);
+
+        self::assertIsString($stdout);
+        self::assertIsString($stderr);
+
+        return [$exitCode, $stdout, $stderr];
+    }
+
+    private function fakeAutoloader(string $message, int $exitCode): string
+    {
+        return <<<PHP
+<?php
+
+declare(strict_types=1);
+
+namespace Flux\Console;
+
+final class Application
+{
+    public function run(array \$argv): int
+    {
+        fwrite(STDOUT, "{$message}\n");
+
+        return {$exitCode};
+    }
+}
+
+PHP;
     }
 }
