@@ -2,3 +2,6 @@
 /.gitattributes export-ignore
 /AGENTS.md export-ignore
 graphify-out/graph.json merge=graphify
+
+# Generated Graphify artifacts
+graphify-out/** linguist-generated 
