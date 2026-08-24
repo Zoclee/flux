@@ -12,7 +12,7 @@ First release candidate for the Flux MVP.
 - Protocol-neutral broker core for publish, reserve, acknowledge, reject, and release operations.
 - `flux` CLI for migrations, health/readiness checks, runtime diagnostics, and administrative inspection.
 - AMQP 0-9-1 adapter with queue, exchange, binding, publish, consume, get, ack/reject/nack, QoS, and basic publisher-confirm support.
-- Plaintext and TLS AMQP listeners with username/password authentication and per-vhost authorization.
+- AMQP listeners with plaintext and TLS support, username/password authentication, and per-vhost authorization.
 - Retry and dead-letter handling, resource limits, overload protection, and graceful bounded shutdown.
 
 ### Known Limitations
