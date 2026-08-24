@@ -1,6 +1,6 @@
 {
     "name": "zoclee/flux",
-    "description": "A lightweight unified message broker written from scratch in vanilla PHP.",
+    "description": "Flux is a pure PHP implementation of a unified message broker with PostgreSQL persistence.",
     "type": "project",
     "license": "MIT",
     "bin": [

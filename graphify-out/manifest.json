@@ -1,9 +1,9 @@
 {
   "composer.json": {
-    "mtime": 1787420109.142821,
-    "seen": 1787508706.7164986,
-    "ast_hash": "2f2381f6933d7572754000a09361118f",
-    "semantic_hash": "2f2381f6933d7572754000a09361118f"
+    "mtime": 1787595562.550212,
+    "seen": 1787595849.333082,
+    "ast_hash": "5c0c6620ff0870f938a403cd037fcde1",
+    "semantic_hash": ""
   },
   "config/flux.php": {
     "mtime": 1787414778.7209141,
