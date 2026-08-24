@@ -11,6 +11,7 @@ final readonly class PublishRequest
 {
     /**
      * @param array<string, mixed> $headers
+     * @param array<string, mixed> $metadata
      */
     public function __construct(
         public string $virtualHost,
@@ -23,6 +24,7 @@ final readonly class PublishRequest
         public int $priority = 0,
         public bool $persistent = true,
         public ?string $messageId = null,
+        public array $metadata = [],
         public bool $persistUnrouted = true
     ) {
         if ($this->virtualHost === '') {
@@ -35,6 +37,10 @@ final readonly class PublishRequest
 
         if ($this->headers !== [] && array_is_list($this->headers)) {
             throw new InvalidArgumentException('Message headers must be a JSON object.');
+        }
+
+        if ($this->metadata !== [] && array_is_list($this->metadata)) {
+            throw new InvalidArgumentException('Message metadata must be a JSON object.');
         }
 
         if ($this->priority < 0 || $this->priority > 255) {

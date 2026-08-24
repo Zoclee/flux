@@ -168,10 +168,10 @@
     "semantic_hash": "03ddff25dd9f4caa7206cd9fd28f7d0a"
   },
   "src/Broker/Broker.php": {
-    "mtime": 1787477337.1485403,
-    "seen": 1787508706.7164986,
-    "ast_hash": "1e759a058734ca7e6a9dbc0922bd0a05",
-    "semantic_hash": "1e759a058734ca7e6a9dbc0922bd0a05"
+    "mtime": 1787587140.4341426,
+    "seen": 1787588333.8515263,
+    "ast_hash": "bf4c571998bb08834f43a6a5d8835f96",
+    "semantic_hash": ""
   },
   "src/Broker/Delivery.php": {
     "mtime": 1787258457.3834863,
@@ -204,10 +204,10 @@
     "semantic_hash": "72a94cea186f361776de4659b7d42774"
   },
   "src/Broker/Message.php": {
-    "mtime": 1787256276.8110218,
-    "seen": 1787508706.7164986,
-    "ast_hash": "8e9622b0c21da1ccacc9abd483b3fe1f",
-    "semantic_hash": "8e9622b0c21da1ccacc9abd483b3fe1f"
+    "mtime": 1787587128.4909108,
+    "seen": 1787588333.8515263,
+    "ast_hash": "6c358038a5bebde680d6e4876f574672",
+    "semantic_hash": ""
   },
   "src/Broker/MessageRoute.php": {
     "mtime": 1787256809.795511,
@@ -216,10 +216,10 @@
     "semantic_hash": "f6f3b0841eff87b644781118c97142eb"
   },
   "src/Broker/PublishRequest.php": {
-    "mtime": 1787424383.9569924,
-    "seen": 1787508706.7164986,
-    "ast_hash": "190011ba7ee58921dc500bdb4083bfae",
-    "semantic_hash": "190011ba7ee58921dc500bdb4083bfae"
+    "mtime": 1787587128.4909108,
+    "seen": 1787588333.8515263,
+    "ast_hash": "6a9637cc9ecd432b0d6816b82b101c5a",
+    "semantic_hash": ""
   },
   "src/Broker/PublishResult.php": {
     "mtime": 1787424131.8036194,
@@ -522,10 +522,10 @@
     "semantic_hash": "ed43f7d25fb0333d808d81202cf18f12"
   },
   "src/Persistence/Postgres/MessageRepository.php": {
-    "mtime": 1787390412.8249273,
-    "seen": 1787508706.7164986,
-    "ast_hash": "ae1e7bf9f02f5c1ef256be3a2052a0e2",
-    "semantic_hash": "ae1e7bf9f02f5c1ef256be3a2052a0e2"
+    "mtime": 1787587128.4960432,
+    "seen": 1787588333.8515263,
+    "ast_hash": "2cb39e21ac3ce0ee263b52e400284b5f",
+    "semantic_hash": ""
   },
   "src/Persistence/Postgres/MessageRouteRepository.php": {
     "mtime": 1787390418.3240683,
@@ -552,10 +552,10 @@
     "semantic_hash": "5139d25d6a9547db5b441a6b25aa0ab2"
   },
   "src/Persistence/Postgres/PublishTransaction.php": {
-    "mtime": 1787427172.838322,
-    "seen": 1787508706.7164986,
-    "ast_hash": "efd23b5917034867c03c321724fc91f3",
-    "semantic_hash": "efd23b5917034867c03c321724fc91f3"
+    "mtime": 1787587140.4448304,
+    "seen": 1787588333.8515263,
+    "ast_hash": "6d20531cb7c6add8c25fb20807ddb44b",
+    "semantic_hash": ""
   },
   "src/Persistence/Postgres/RoutingSourceRepository.php": {
     "mtime": 1787409271.5402904,
@@ -582,9 +582,9 @@
     "semantic_hash": "cb6b9d57f362fd27f97fc3068e4352ab"
   },
   "src/Protocol/Amqp/AmqpConnection.php": {
-    "mtime": 1787514441.7767074,
-    "seen": 1787514885.3160462,
-    "ast_hash": "d40715ddd1be35333ff64bce38ec818d",
+    "mtime": 1787587198.498884,
+    "seen": 1787588333.8515263,
+    "ast_hash": "4f8c0a287bf92f9a757c899703308ebb",
     "semantic_hash": ""
   },
   "src/Protocol/Amqp/AmqpConnectionState.php": {
@@ -756,10 +756,10 @@
     "semantic_hash": "19a18e4bdc1dc6397cbc9983eaa96701"
   },
   "tests/Integration/Postgres/ConnectionTest.php": {
-    "mtime": 1787427172.8426175,
-    "seen": 1787508706.7164986,
-    "ast_hash": "332dbb6e5ba6ca5beb5f0d78a7b1ec96",
-    "semantic_hash": "332dbb6e5ba6ca5beb5f0d78a7b1ec96"
+    "mtime": 1787587808.0110965,
+    "seen": 1787588333.8515263,
+    "ast_hash": "51ca9f1fe7e664dd736ddd5d1b171ba2",
+    "semantic_hash": ""
   },
   "tests/Integration/Postgres/DeliveryRepositoryTest.php": {
     "mtime": 1787423182.3815877,
@@ -774,10 +774,10 @@
     "semantic_hash": "7bb2957a63c81122156f529d96602f7d"
   },
   "tests/Integration/Postgres/MessageRepositoryTest.php": {
-    "mtime": 1787256276.8247125,
-    "seen": 1787508706.7164986,
-    "ast_hash": "955aa7f77cc956567dff10f485b0e6ae",
-    "semantic_hash": "955aa7f77cc956567dff10f485b0e6ae"
+    "mtime": 1787587808.0110965,
+    "seen": 1787588333.8515263,
+    "ast_hash": "1bcb9e7f9f280c04bbacf32384973885",
+    "semantic_hash": ""
   },
   "tests/Integration/Postgres/MessageRouteRepositoryTest.php": {
     "mtime": 1787256809.7985182,
@@ -798,10 +798,10 @@
     "semantic_hash": "c950ffd7c8debcba208ba977115d9a11"
   },
   "tests/Integration/Postgres/SchemaTest.php": {
-    "mtime": 1787426838.6532235,
-    "seen": 1787508706.7164986,
-    "ast_hash": "400d5744687f3a77e963acdc19f5048a",
-    "semantic_hash": "400d5744687f3a77e963acdc19f5048a"
+    "mtime": 1787587808.0110965,
+    "seen": 1787588333.8515263,
+    "ast_hash": "4202013d6a1f78293364b79b49897003",
+    "semantic_hash": ""
   },
   "tests/Integration/Postgres/SubscriptionRepositoryTest.php": {
     "mtime": 1787258607.4255836,
@@ -828,9 +828,9 @@
     "semantic_hash": "f6f64bca66e6ba74fb43900c51db67a0"
   },
   "tests/Integration/Protocol/Amqp/AmqpPublishConsumeTest.php": {
-    "mtime": 1787511248.990735,
-    "seen": 1787512110.6193511,
-    "ast_hash": "79d021286febb751c859ef4452f0bfeb",
+    "mtime": 1787587808.0188456,
+    "seen": 1787588333.8515263,
+    "ast_hash": "c7f0386516599d6b6e46bf0d857b1661",
     "semantic_hash": ""
   },
   "tests/Integration/Protocol/Amqp/AmqpTopologyTest.php": {
@@ -894,10 +894,10 @@
     "semantic_hash": "bd5253a51ee809cf8f3331cb508fc7b5"
   },
   "tests/Unit/Persistence/Postgres/MigrationFilenameTest.php": {
-    "mtime": 1787426838.6562278,
-    "seen": 1787508706.7164986,
-    "ast_hash": "f5e270d3545fb4333009471941c1dd56",
-    "semantic_hash": "f5e270d3545fb4333009471941c1dd56"
+    "mtime": 1787587808.0110965,
+    "seen": 1787588333.8515263,
+    "ast_hash": "41473b6b05f43c397b3152aed308a817",
+    "semantic_hash": ""
   },
   "tests/Unit/Protocol/Amqp/AmqpConnectionTest.php": {
     "mtime": 1787422772.2089756,
@@ -975,6 +975,12 @@
     "mtime": 1787418999.3477643,
     "seen": 1787508706.7164986,
     "ast_hash": "6625c23ac1f02a95768c22f732d48ea9",
+    "semantic_hash": ""
+  },
+  "database/migrations/20260820_120015_add_message_metadata.sql": {
+    "mtime": 1787587128.4988496,
+    "seen": 1787588333.8515263,
+    "ast_hash": "3860328a4fbf96e7919d37ee713e2ecf",
     "semantic_hash": ""
   }
 }

@@ -71,6 +71,7 @@ final readonly class Broker
             $request->priority,
             $request->persistent,
             $request->messageId,
+            $request->metadata,
             $request->persistUnrouted,
             $routingSource?->type ?? RoutingSourceType::Direct
         );
@@ -156,6 +157,7 @@ final readonly class Broker
         int $priority = 0,
         bool $persistent = true,
         ?string $messageId = null,
+        array $metadata = [],
         ?string $connectionId = null
     ): PublishResult {
         $virtualHost = $this->virtualHosts->findByName($virtualHostName);
@@ -177,7 +179,8 @@ final readonly class Broker
             $contentEncoding,
             $priority,
             $persistent,
-            $messageId
+            $messageId,
+            $metadata
         );
     }
 

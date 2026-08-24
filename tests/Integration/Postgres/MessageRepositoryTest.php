@@ -127,6 +127,28 @@ final class MessageRepositoryTest extends TestCase
         self::assertEquals($headers, $found->headers);
     }
 
+    public function testMessageMetadataRoundTrips(): void
+    {
+        $metadata = [
+            'amqp_basic_properties' => [
+                'correlation_id' => 'correlation-0027',
+                'reply_to' => 'reply.queue',
+                'expiration' => '60000',
+                'message_id' => 'message-0027',
+                'timestamp' => 1777777777,
+                'type' => 'flux.test.message',
+                'user_id' => 'guest',
+                'app_id' => 'flux-pika-test',
+            ],
+        ];
+
+        $message = $this->messages->create('metadata', metadata: $metadata);
+        $found = $this->messages->findById($message->id);
+
+        self::assertNotNull($found);
+        self::assertEquals($metadata, $found->metadata);
+    }
+
     public function testHeaderListShapeIsRejected(): void
     {
         $this->expectException(InvalidArgumentException::class);

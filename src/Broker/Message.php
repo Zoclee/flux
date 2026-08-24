@@ -10,6 +10,7 @@ final readonly class Message
 {
     /**
      * @param array<string, mixed> $headers
+     * @param array<string, mixed> $metadata
      */
     public function __construct(
         public int $id,
@@ -20,6 +21,7 @@ final readonly class Message
         public ?string $contentEncoding,
         public int $priority,
         public bool $persistent,
+        public array $metadata,
         public DateTimeImmutable $createdAt
     ) {
     }

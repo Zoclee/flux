@@ -118,6 +118,132 @@ final class AmqpPublishConsumeTest extends TestCase
         self::assertSame(7, $message->priority);
     }
 
+    public function testAmqpBasicPropertiesRoundTripIndividuallyThroughBasicGet(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        $cases = [
+            'content_type' => ['content_type' => 'application/json'],
+            'content_encoding' => ['content_encoding' => 'utf-8'],
+            'headers' => ['headers' => ['string' => 'value', 'int' => 27, 'bool' => true]],
+            'delivery_mode' => ['delivery_mode' => 1],
+            'priority' => ['priority' => 5],
+            'correlation_id' => ['correlation_id' => 'correlation-0027'],
+            'reply_to' => ['reply_to' => 'reply.queue'],
+            'expiration' => ['expiration' => '60000'],
+            'message_id' => ['message_id' => 'message-0027'],
+            'timestamp' => ['timestamp' => 1777777777],
+            'type' => ['type' => 'flux.test.message'],
+            'user_id' => ['user_id' => 'guest'],
+            'app_id' => ['app_id' => 'flux-pika-test'],
+            'cluster_id' => ['cluster_id' => 'cluster-a'],
+        ];
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+
+            foreach ($cases as $name => $properties) {
+                $queue = 'props.' . $name;
+                $body = 'body-' . $name;
+                $this->sendMethod($client, 1, 50, 10, $this->queueDeclare($queue));
+                self::assertSame([50, 11], $this->readMethod($listener, $client));
+                $this->publishBodyWithProperties($listener, $client, 1, '', $queue, $body, $properties);
+
+                $this->sendMethod($client, 1, 60, 70, $this->basicGet($queue, noAck: true));
+                self::assertSame([60, 71], $this->readMethodFrame($listener, $client)->method());
+                $header = $this->readFrame($listener, $client);
+                self::assertEquals($properties, $this->basicPropertiesFromHeader($header));
+                self::assertSame($body, $this->readFrame($listener, $client)->payload);
+            }
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testAmqpBasicPropertiesRoundTripThroughBasicGetAndKeepInternalIdSeparate(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $properties = $this->completeBasicProperties(1777777777);
+        $payload = "{\"id\":27}\x00\xff";
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('properties.get'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->publishBodyWithProperties($listener, $client, 1, '', 'properties.get', $payload, $properties);
+
+            $message = $this->messageForSingleDelivery('properties.get');
+            self::assertNotSame('message-0027', $message->messageId);
+            self::assertMatchesRegularExpression(
+                '/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/',
+                $message->messageId
+            );
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('properties.get', noAck: true));
+            self::assertSame([60, 71], $this->readMethodFrame($listener, $client)->method());
+            $header = $this->readFrame($listener, $client);
+            self::assertEquals($properties, $this->basicPropertiesFromHeader($header));
+            self::assertSame($payload, $this->readFrame($listener, $client)->payload);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testAmqpBasicPropertiesRoundTripThroughBasicConsumeAfterRestart(): void
+    {
+        [$listener, $client] = $this->startedListener();
+        $properties = $this->completeBasicProperties(1777777778);
+        $payload = "binary\x00body\xff";
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('properties.consume'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->publishBodyWithProperties($listener, $client, 1, '', 'properties.consume', $payload, $properties);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 60, 20, $this->basicConsume('properties.consume', 'consumer-a'));
+            self::assertSame([60, 21], $this->readMethod($listener, $client));
+            self::assertSame([60, 60], $this->readMethodFrame($listener, $client)->method());
+            $header = $this->readFrame($listener, $client);
+            self::assertEquals($properties, $this->basicPropertiesFromHeader($header));
+            self::assertSame($payload, $this->readFrame($listener, $client)->payload);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
+    public function testOmittedAmqpBasicPropertiesRemainAbsentOnDelivery(): void
+    {
+        [$listener, $client] = $this->startedListener();
+
+        try {
+            $this->connectAndOpenChannel($listener, $client, 1);
+            $this->sendMethod($client, 1, 50, 10, $this->queueDeclare('properties.omitted'));
+            self::assertSame([50, 11], $this->readMethod($listener, $client));
+            $this->publishBodyWithProperties($listener, $client, 1, '', 'properties.omitted', 'payload', []);
+
+            $this->sendMethod($client, 1, 60, 70, $this->basicGet('properties.omitted', noAck: true));
+            self::assertSame([60, 71], $this->readMethodFrame($listener, $client)->method());
+            $header = $this->readFrame($listener, $client);
+            self::assertSame([], $this->basicPropertiesFromHeader($header));
+            self::assertSame('payload', $this->readFrame($listener, $client)->payload);
+        } finally {
+            fclose($client);
+            $listener->stop();
+        }
+    }
+
     public function testExclusiveQueueLifecycleIsScopedToOwningConnection(): void
     {
         [$listener, $owner] = $this->startedListener();
@@ -3857,6 +3983,26 @@ final class AmqpPublishConsumeTest extends TestCase
 
     /**
      * @param resource $client
+     * @param array<string, mixed> $properties
+     */
+    private function publishBodyWithProperties(
+        AmqpListener $listener,
+        mixed $client,
+        int $channel,
+        string $exchange,
+        string $routingKey,
+        string $body,
+        array $properties
+    ): void {
+        $codec = new FrameCodec();
+        $this->sendMethod($client, $channel, 60, 40, $this->basicPublish($exchange, $routingKey));
+        fwrite($client, $codec->encode($this->contentHeaderWithProperties($channel, strlen($body), $properties)));
+        fwrite($client, $codec->encode(new Frame(Frame::TYPE_BODY, $channel, $body)));
+        $listener->tick();
+    }
+
+    /**
+     * @param resource $client
      * @param list<string> $bodies
      */
     private function declareQueueAndPublishBodies(AmqpListener $listener, mixed $client, string $queue, array $bodies): void
@@ -4000,6 +4146,179 @@ final class AmqpPublishConsumeTest extends TestCase
         }
 
         return new Frame(Frame::TYPE_HEADER, $channel, pack('nn', 60, 0) . $this->packLongLong($bodySize) . pack('n', $flags) . $values);
+    }
+
+    /**
+     * @param array<string, mixed> $properties
+     */
+    private function contentHeaderWithProperties(int $channel, int $bodySize, array $properties): Frame
+    {
+        $flags = 0;
+        $values = '';
+
+        if (isset($properties['content_type'])) {
+            $flags |= 0b1000000000000000;
+            $values .= $this->shortString((string) $properties['content_type']);
+        }
+        if (isset($properties['content_encoding'])) {
+            $flags |= 0b0100000000000000;
+            $values .= $this->shortString((string) $properties['content_encoding']);
+        }
+        if (isset($properties['headers']) && is_array($properties['headers'])) {
+            $flags |= 0b0010000000000000;
+            $values .= $this->fieldTable($properties['headers']);
+        }
+        if (isset($properties['delivery_mode'])) {
+            $flags |= 0b0001000000000000;
+            $values .= chr((int) $properties['delivery_mode']);
+        }
+        if (isset($properties['priority'])) {
+            $flags |= 0b0000100000000000;
+            $values .= chr((int) $properties['priority']);
+        }
+        if (isset($properties['correlation_id'])) {
+            $flags |= 0b0000010000000000;
+            $values .= $this->shortString((string) $properties['correlation_id']);
+        }
+        if (isset($properties['reply_to'])) {
+            $flags |= 0b0000001000000000;
+            $values .= $this->shortString((string) $properties['reply_to']);
+        }
+        if (isset($properties['expiration'])) {
+            $flags |= 0b0000000100000000;
+            $values .= $this->shortString((string) $properties['expiration']);
+        }
+        if (isset($properties['message_id'])) {
+            $flags |= 0b0000000010000000;
+            $values .= $this->shortString((string) $properties['message_id']);
+        }
+        if (isset($properties['timestamp'])) {
+            $flags |= 0b0000000001000000;
+            $values .= $this->packLongLong((int) $properties['timestamp']);
+        }
+        if (isset($properties['type'])) {
+            $flags |= 0b0000000000100000;
+            $values .= $this->shortString((string) $properties['type']);
+        }
+        if (isset($properties['user_id'])) {
+            $flags |= 0b0000000000010000;
+            $values .= $this->shortString((string) $properties['user_id']);
+        }
+        if (isset($properties['app_id'])) {
+            $flags |= 0b0000000000001000;
+            $values .= $this->shortString((string) $properties['app_id']);
+        }
+        if (isset($properties['cluster_id'])) {
+            $flags |= 0b0000000000000100;
+            $values .= $this->shortString((string) $properties['cluster_id']);
+        }
+
+        return new Frame(Frame::TYPE_HEADER, $channel, pack('nn', 60, 0) . $this->packLongLong($bodySize) . pack('n', $flags) . $values);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function completeBasicProperties(int $timestamp): array
+    {
+        return [
+            'content_type' => 'application/json',
+            'content_encoding' => 'utf-8',
+            'headers' => ['string' => 'value', 'int' => 27, 'bool' => true],
+            'delivery_mode' => 2,
+            'priority' => 5,
+            'correlation_id' => 'correlation-0027',
+            'reply_to' => 'reply.queue',
+            'expiration' => '60000',
+            'message_id' => 'message-0027',
+            'timestamp' => $timestamp,
+            'type' => 'flux.test.message',
+            'user_id' => 'guest',
+            'app_id' => 'flux-pika-test',
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function basicPropertiesFromHeader(Frame $frame): array
+    {
+        $reader = new \Flux\Protocol\Amqp\AmqpMethodReader($frame->payload);
+        $reader->readShort();
+        $reader->readShort();
+        $reader->readLongLong();
+        $flags = $reader->readShort();
+        $properties = [];
+
+        if (($flags & 0b1000000000000000) !== 0) {
+            $properties['content_type'] = $reader->readShortString();
+        }
+        if (($flags & 0b0100000000000000) !== 0) {
+            $properties['content_encoding'] = $reader->readShortString();
+        }
+        if (($flags & 0b0010000000000000) !== 0) {
+            $properties['headers'] = $reader->readTable();
+        }
+        if (($flags & 0b0001000000000000) !== 0) {
+            $properties['delivery_mode'] = $reader->readOctet();
+        }
+        if (($flags & 0b0000100000000000) !== 0) {
+            $properties['priority'] = $reader->readOctet();
+        }
+        if (($flags & 0b0000010000000000) !== 0) {
+            $properties['correlation_id'] = $reader->readShortString();
+        }
+        if (($flags & 0b0000001000000000) !== 0) {
+            $properties['reply_to'] = $reader->readShortString();
+        }
+        if (($flags & 0b0000000100000000) !== 0) {
+            $properties['expiration'] = $reader->readShortString();
+        }
+        if (($flags & 0b0000000010000000) !== 0) {
+            $properties['message_id'] = $reader->readShortString();
+        }
+        if (($flags & 0b0000000001000000) !== 0) {
+            $properties['timestamp'] = $reader->readLongLong();
+        }
+        if (($flags & 0b0000000000100000) !== 0) {
+            $properties['type'] = $reader->readShortString();
+        }
+        if (($flags & 0b0000000000010000) !== 0) {
+            $properties['user_id'] = $reader->readShortString();
+        }
+        if (($flags & 0b0000000000001000) !== 0) {
+            $properties['app_id'] = $reader->readShortString();
+        }
+        if (($flags & 0b0000000000000100) !== 0) {
+            $properties['cluster_id'] = $reader->readShortString();
+        }
+        $reader->assertComplete();
+
+        return $properties;
+    }
+
+    /**
+     * @param array<string, mixed> $values
+     */
+    private function fieldTable(array $values): string
+    {
+        $payload = '';
+        foreach ($values as $key => $value) {
+            $payload .= $this->shortString((string) $key);
+            if (is_bool($value)) {
+                $payload .= 't' . chr($value ? 1 : 0);
+            } elseif (is_int($value)) {
+                $payload .= 'I' . pack('N', $value);
+            } elseif (is_array($value)) {
+                $payload .= 'F' . $this->fieldTable($value);
+            } elseif ($value === null) {
+                $payload .= 'V';
+            } else {
+                $payload .= 'S' . $this->longString((string) $value);
+            }
+        }
+
+        return pack('N', strlen($payload)) . $payload;
     }
 
     private function shortString(string $value): string
@@ -4249,13 +4568,18 @@ final class AmqpPublishConsumeTest extends TestCase
 
     private function payloadForSingleMessage(string $queue): string
     {
+        return $this->messageForSingleDelivery($queue)->payload;
+    }
+
+    private function messageForSingleDelivery(string $queue): \Flux\Broker\Message
+    {
         $delivery = $this->singleDelivery($queue);
         $route = (new MessageRouteRepository($this->connection))->findById($delivery->messageRouteId);
         self::assertNotNull($route);
         $message = (new MessageRepository($this->connection))->findById($route->messageId);
         self::assertNotNull($message);
 
-        return $message->payload;
+        return $message;
     }
 
     private function tableCount(string $table): int

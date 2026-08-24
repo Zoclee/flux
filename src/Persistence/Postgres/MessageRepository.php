@@ -21,6 +21,7 @@ final readonly class MessageRepository
 
     /**
      * @param array<string, mixed> $headers
+     * @param array<string, mixed> $metadata
      */
     public function create(
         string $payload,
@@ -29,15 +30,16 @@ final readonly class MessageRepository
         ?string $contentEncoding = null,
         int $priority = 0,
         bool $persistent = true,
-        ?string $messageId = null
+        ?string $messageId = null,
+        array $metadata = []
     ): Message {
         $messageId ??= Uuid::v4();
         Uuid::assertValid($messageId, 'Message ID');
 
         $statement = $this->connection->pdo()->prepare(<<<'SQL'
-INSERT INTO messages (message_id, payload, headers, content_type, content_encoding, priority, persistent)
-VALUES (:message_id, :payload, :headers::jsonb, :content_type, :content_encoding, :priority, :persistent)
-RETURNING id, message_id, payload, headers, content_type, content_encoding, priority, persistent, created_at
+INSERT INTO messages (message_id, payload, headers, content_type, content_encoding, priority, persistent, metadata)
+VALUES (:message_id, :payload, :headers::jsonb, :content_type, :content_encoding, :priority, :persistent, :metadata::jsonb)
+RETURNING id, message_id, payload, headers, content_type, content_encoding, priority, persistent, metadata, created_at
 SQL);
         $statement->bindValue('message_id', $messageId);
         $statement->bindValue('payload', $payload, PDO::PARAM_LOB);
@@ -46,6 +48,7 @@ SQL);
         $statement->bindValue('content_encoding', $contentEncoding);
         $statement->bindValue('priority', $priority, PDO::PARAM_INT);
         $statement->bindValue('persistent', $persistent, PDO::PARAM_BOOL);
+        $statement->bindValue('metadata', $this->encodeObject($metadata, 'Message metadata'));
         $statement->execute();
 
         $row = $statement->fetch(PDO::FETCH_ASSOC);
@@ -60,7 +63,7 @@ SQL);
     public function findById(int $id): ?Message
     {
         $statement = $this->connection->pdo()->prepare(<<<'SQL'
-SELECT id, message_id, payload, headers, content_type, content_encoding, priority, persistent, created_at
+SELECT id, message_id, payload, headers, content_type, content_encoding, priority, persistent, metadata, created_at
 FROM messages
 WHERE id = :id
 SQL);
@@ -88,7 +91,7 @@ SQL);
         Uuid::assertValid($messageId, 'Message ID');
 
         $statement = $this->connection->pdo()->prepare(<<<'SQL'
-SELECT id, message_id, payload, headers, content_type, content_encoding, priority, persistent, created_at
+SELECT id, message_id, payload, headers, content_type, content_encoding, priority, persistent, metadata, created_at
 FROM messages
 WHERE message_id = :message_id
 SQL);
@@ -120,7 +123,7 @@ SQL);
         }
 
         $statement = $this->connection->pdo()->prepare(sprintf(<<<'SQL'
-SELECT id, message_id, payload, headers, content_type, content_encoding, priority, persistent, created_at
+SELECT id, message_id, payload, headers, content_type, content_encoding, priority, persistent, metadata, created_at
 FROM messages
 WHERE id IN (%s)
 ORDER BY id
@@ -148,6 +151,7 @@ SQL, implode(', ', $placeholders)));
      *     content_encoding: mixed,
      *     priority: mixed,
      *     persistent: mixed,
+     *     metadata: mixed,
      *     created_at: mixed
      * } $row
      */
@@ -162,6 +166,7 @@ SQL, implode(', ', $placeholders)));
             $row['content_encoding'] === null ? null : (string) $row['content_encoding'],
             (int) $row['priority'],
             $this->toBool($row['persistent']),
+            $this->decodeObject((string) $row['metadata'], 'Message metadata'),
             new DateTimeImmutable((string) $row['created_at'])
         );
     }
@@ -173,11 +178,7 @@ SQL, implode(', ', $placeholders)));
      */
     private function encodeHeaders(array $headers): string
     {
-        if ($headers !== [] && array_is_list($headers)) {
-            throw new InvalidArgumentException('Message headers must be a JSON object.');
-        }
-
-        return json_encode((object) $headers, JSON_THROW_ON_ERROR);
+        return $this->encodeObject($headers, 'Message headers');
     }
 
     /**
@@ -187,10 +188,34 @@ SQL, implode(', ', $placeholders)));
      */
     private function decodeHeaders(string $headers): array
     {
-        $decoded = json_decode($headers, true, flags: JSON_THROW_ON_ERROR);
+        return $this->decodeObject($headers, 'Message headers');
+    }
+
+    /**
+     * @param array<string, mixed> $value
+     *
+     * @throws JsonException
+     */
+    private function encodeObject(array $value, string $label): string
+    {
+        if ($value !== [] && array_is_list($value)) {
+            throw new InvalidArgumentException($label . ' must be a JSON object.');
+        }
+
+        return json_encode((object) $value, JSON_THROW_ON_ERROR);
+    }
+
+    /**
+     * @return array<string, mixed>
+     *
+     * @throws JsonException
+     */
+    private function decodeObject(string $value, string $label): array
+    {
+        $decoded = json_decode($value, true, flags: JSON_THROW_ON_ERROR);
 
         if (!is_array($decoded) || ($decoded !== [] && array_is_list($decoded))) {
-            throw new RuntimeException('Message headers stored in PostgreSQL are not a JSON object.');
+            throw new RuntimeException($label . ' stored in PostgreSQL is not a JSON object.');
         }
 
         return $decoded;

@@ -25,8 +25,6 @@ use Flux\Runtime\ConnectionRegistry;
 use Flux\Runtime\ConsumerRegistry;
 use Flux\Runtime\RuntimeConnection;
 use Flux\Runtime\RuntimeConsumer;
-use Flux\Support\Uuid;
-use InvalidArgumentException;
 use RuntimeException;
 use Throwable;
 
@@ -1200,16 +1198,7 @@ final class AmqpConnection
         unset($this->pendingPublishes[$channel]);
 
         $properties = $publish['properties'];
-        $messageId = $properties['message_id'] ?? null;
-        if (is_string($messageId)) {
-            try {
-                Uuid::assertValid($messageId, 'Message ID');
-            } catch (InvalidArgumentException) {
-                $messageId = null;
-            }
-        } else {
-            $messageId = null;
-        }
+        $metadata = $this->amqpMessageMetadata($properties);
 
         if ($publish['exchange'] === '') {
             try {
@@ -1222,8 +1211,8 @@ final class AmqpConnection
                     $properties['content_encoding'] ?? null,
                     $properties['priority'] ?? 0,
                     ($properties['delivery_mode'] ?? 2) === 2,
-                    $messageId,
-                    $this->runtimeConnection->id
+                    metadata: $metadata,
+                    connectionId: $this->runtimeConnection->id
                 );
                 $this->sendPublishConfirm($channel);
                 $this->deliverToConsumers();
@@ -1249,7 +1238,7 @@ final class AmqpConnection
                 $properties['content_encoding'] ?? null,
                 $properties['priority'] ?? 0,
                 ($properties['delivery_mode'] ?? 2) === 2,
-                $messageId,
+                metadata: $metadata,
                 persistUnrouted: false
             ));
             if ($result->routeCount() === 0 && $publish['mandatory']) {
@@ -1308,34 +1297,43 @@ final class AmqpConnection
             $properties['priority'] = $reader->readOctet();
         }
         if (($first & 0b0000010000000000) !== 0) {
-            $reader->readShortString();
+            $properties['correlation_id'] = $reader->readShortString();
         }
         if (($first & 0b0000001000000000) !== 0) {
-            $reader->readShortString();
+            $properties['reply_to'] = $reader->readShortString();
         }
         if (($first & 0b0000000100000000) !== 0) {
-            $reader->readShortString();
+            $properties['expiration'] = $reader->readShortString();
         }
         if (($first & 0b0000000010000000) !== 0) {
             $properties['message_id'] = $reader->readShortString();
         }
         if (($first & 0b0000000001000000) !== 0) {
-            $reader->readLongLong();
+            $properties['timestamp'] = $reader->readLongLong();
         }
         if (($first & 0b0000000000100000) !== 0) {
-            $reader->readShortString();
+            $properties['type'] = $reader->readShortString();
         }
         if (($first & 0b0000000000010000) !== 0) {
-            $reader->readShortString();
+            $properties['user_id'] = $reader->readShortString();
         }
         if (($first & 0b0000000000001000) !== 0) {
-            $reader->readShortString();
+            $properties['app_id'] = $reader->readShortString();
         }
         if (($first & 0b0000000000000100) !== 0) {
-            $reader->readShortString();
+            $properties['cluster_id'] = $reader->readShortString();
         }
 
         return $properties;
+    }
+
+    /**
+     * @param array<string, mixed> $properties
+     * @return array<string, array<string, mixed>>
+     */
+    private function amqpMessageMetadata(array $properties): array
+    {
+        return ['amqp_basic_properties' => $properties];
     }
 
     private function deliverToConsumers(): void
@@ -1426,6 +1424,11 @@ final class AmqpConnection
 
     private function contentHeader(Message $message): string
     {
+        $properties = $message->metadata['amqp_basic_properties'] ?? null;
+        if (is_array($properties)) {
+            return $this->contentHeaderFromProperties($message->payload, $properties);
+        }
+
         $flags = 0;
         $values = '';
 
@@ -1507,9 +1510,41 @@ final class AmqpConnection
             $flags |= 0b0000100000000000;
             $values .= chr($properties['priority']);
         }
+        if (isset($properties['correlation_id']) && is_string($properties['correlation_id'])) {
+            $flags |= 0b0000010000000000;
+            $values .= $this->shortString($properties['correlation_id']);
+        }
+        if (isset($properties['reply_to']) && is_string($properties['reply_to'])) {
+            $flags |= 0b0000001000000000;
+            $values .= $this->shortString($properties['reply_to']);
+        }
+        if (isset($properties['expiration']) && is_string($properties['expiration'])) {
+            $flags |= 0b0000000100000000;
+            $values .= $this->shortString($properties['expiration']);
+        }
         if (isset($properties['message_id']) && is_string($properties['message_id'])) {
             $flags |= 0b0000000010000000;
             $values .= $this->shortString($properties['message_id']);
+        }
+        if (isset($properties['timestamp']) && is_int($properties['timestamp'])) {
+            $flags |= 0b0000000001000000;
+            $values .= $this->packLongLong($properties['timestamp']);
+        }
+        if (isset($properties['type']) && is_string($properties['type'])) {
+            $flags |= 0b0000000000100000;
+            $values .= $this->shortString($properties['type']);
+        }
+        if (isset($properties['user_id']) && is_string($properties['user_id'])) {
+            $flags |= 0b0000000000010000;
+            $values .= $this->shortString($properties['user_id']);
+        }
+        if (isset($properties['app_id']) && is_string($properties['app_id'])) {
+            $flags |= 0b0000000000001000;
+            $values .= $this->shortString($properties['app_id']);
+        }
+        if (isset($properties['cluster_id']) && is_string($properties['cluster_id'])) {
+            $flags |= 0b0000000000000100;
+            $values .= $this->shortString($properties['cluster_id']);
         }
 
         return pack('nn', 60, 0) . $this->packLongLong(strlen($body)) . pack('n', $flags) . $values;

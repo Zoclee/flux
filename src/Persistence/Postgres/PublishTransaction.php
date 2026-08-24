@@ -36,6 +36,7 @@ final readonly class PublishTransaction
 
     /**
      * @param array<string, mixed> $headers
+     * @param array<string, mixed> $metadata
      */
     public function publish(
         int $virtualHostId,
@@ -48,6 +49,7 @@ final readonly class PublishTransaction
         int $priority = 0,
         bool $persistent = true,
         ?string $messageId = null,
+        array $metadata = [],
         bool $persistUnrouted = true,
         RoutingSourceType $sourceType = RoutingSourceType::Direct
     ): PublishResult {
@@ -62,6 +64,7 @@ final readonly class PublishTransaction
             $priority,
             $persistent,
             $messageId,
+            $metadata,
             $persistUnrouted,
             $sourceType
         ): PublishResult {
@@ -84,7 +87,8 @@ final readonly class PublishTransaction
                 $contentEncoding,
                 $priority,
                 $persistent,
-                $messageId
+                $messageId,
+                $metadata
             );
 
             $routes = [];
@@ -105,6 +109,7 @@ final readonly class PublishTransaction
 
     /**
      * @param array<string, mixed> $headers
+     * @param array<string, mixed> $metadata
      */
     public function publishToDestination(
         int $destinationId,
@@ -114,7 +119,8 @@ final readonly class PublishTransaction
         ?string $contentEncoding = null,
         int $priority = 0,
         bool $persistent = true,
-        ?string $messageId = null
+        ?string $messageId = null,
+        array $metadata = []
     ): PublishResult {
         return $this->connection->transaction(function () use (
             $destinationId,
@@ -124,7 +130,8 @@ final readonly class PublishTransaction
             $contentEncoding,
             $priority,
             $persistent,
-            $messageId
+            $messageId,
+            $metadata
         ): PublishResult {
             $this->assertQueueDepthCapacity([$destinationId]);
 
@@ -135,7 +142,8 @@ final readonly class PublishTransaction
                 $contentEncoding,
                 $priority,
                 $persistent,
-                $messageId
+                $messageId,
+                $metadata
             );
 
             $route = $this->routes->create($message->id, $destinationId);
