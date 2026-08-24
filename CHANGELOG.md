@@ -2,6 +2,12 @@
 
 All notable changes to Flux will be documented in this file.
 
+## [0.1.0-RC3] - 24 Aug 2026
+
+### Changed
+
+- Cleaned the Composer distribution archive to exclude development-only files and tooling artifacts.
+
 ## [0.1.0-RC2] - 24 Aug 2026
 
 ### Fixed
