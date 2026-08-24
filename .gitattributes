@@ -1,7 +1,14 @@
 /xojo-test export-ignore
 /.gitattributes export-ignore
 /AGENTS.md export-ignore
+/.codex export-ignore
+/graphify-out export-ignore
+/tests export-ignore
+/phpunit.xml export-ignore
+/.gitignore export-ignore
+/composer.lock export-ignore
+
 graphify-out/graph.json merge=graphify
 
 # Generated Graphify artifacts
-graphify-out/** linguist-generated 
+graphify-out/** linguist-generated
