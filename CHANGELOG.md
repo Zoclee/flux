@@ -2,6 +2,12 @@
 
 All notable changes to Flux will be documented in this file.
 
+## [0.1.0-RC2] - 24 Aug 2026
+
+### Fixed
+
+- Fixed the `flux` CLI bootstrap when Flux is installed as a Composer dependency.
+
 ## [0.1.0-RC1] - 24 Aug 2026
 
 First release candidate for the Flux MVP.
