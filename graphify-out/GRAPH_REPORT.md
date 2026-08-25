@@ -10,7 +10,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `21296d6c`
+- Built from commit: `8d84485d`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -218,7 +218,7 @@ Nodes (3): PHPUnit\Framework\Attributes\DataProvider, TopicMatcher, TopicMatcher
 
 ### Community 54 - "Flux"
 Cohesion: 0.15
-Nodes (12): Broker API, CLI, Database Migrations, Directory Structure, Flux, Install, Known Limitations, MVP Capabilities (+4 more)
+Nodes (12): Broker API, CLI, Database Migrations, Directory Structure, Flux, Installation, Known Limitations, MVP Capabilities (+4 more)
 
 ### Community 57 - "RetryPolicy"
 Cohesion: 0.20

@@ -19379,14 +19379,14 @@
       "source_location": "L1"
     },
     {
-      "id": "readme_install",
-      "label": "Install",
+      "id": "readme_installation",
+      "label": "Installation",
       "_origin": "ast",
       "community": 54,
       "community_name": "Flux",
       "file_type": "document",
       "node_kind": "heading",
-      "norm_label": "install",
+      "norm_label": "installation",
       "source_file": "README.md",
       "source_location": "L7"
     },
@@ -66682,7 +66682,7 @@
     },
     {
       "source": "readme_flux",
-      "target": "readme_install",
+      "target": "readme_installation",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
@@ -84420,5 +84420,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "21296d6c108bc990f97a1a95ad0033630b992916"
+  "built_at_commit": "8d84485d44b9081ac2ec7e89c065b9bfb4d4fbc5"
 }

@@ -4,7 +4,7 @@ Flux is a pure PHP implementation of a unified message broker with PostgreSQL pe
 
 Flux is currently at an MVP release-candidate stopping point. The first supported protocol adapter is AMQP 0-9-1, backed by the protocol-neutral Broker core and PostgreSQL persistence.
 
-## Install
+## Installation
 
 These steps install Flux from source and run it as a `systemd` service on an Ubuntu server. Replace `v0.1.0` with the release tag you want to deploy.
 
