@@ -19328,7 +19328,7 @@
       "node_kind": "heading",
       "norm_label": "broker api",
       "source_file": "README.md",
-      "source_location": "L104"
+      "source_location": "L223"
     },
     {
       "id": "readme_cli",
@@ -19340,7 +19340,7 @@
       "node_kind": "heading",
       "norm_label": "cli",
       "source_file": "README.md",
-      "source_location": "L68"
+      "source_location": "L187"
     },
     {
       "id": "readme_database_migrations",
@@ -19352,7 +19352,7 @@
       "node_kind": "heading",
       "norm_label": "database migrations",
       "source_file": "README.md",
-      "source_location": "L169"
+      "source_location": "L288"
     },
     {
       "id": "readme_directory_structure",
@@ -19364,7 +19364,7 @@
       "node_kind": "heading",
       "norm_label": "directory structure",
       "source_file": "README.md",
-      "source_location": "L257"
+      "source_location": "L376"
     },
     {
       "id": "readme_flux",
@@ -19379,16 +19379,16 @@
       "source_location": "L1"
     },
     {
-      "id": "readme_installation",
-      "label": "Installation",
+      "id": "readme_install",
+      "label": "Install",
       "_origin": "ast",
       "community": 54,
       "community_name": "Flux",
       "file_type": "document",
       "node_kind": "heading",
-      "norm_label": "installation",
+      "norm_label": "install",
       "source_file": "README.md",
-      "source_location": "L54"
+      "source_location": "L7"
     },
     {
       "id": "readme_known_limitations",
@@ -19400,7 +19400,7 @@
       "node_kind": "heading",
       "norm_label": "known limitations",
       "source_file": "README.md",
-      "source_location": "L34"
+      "source_location": "L167"
     },
     {
       "id": "readme_mvp_capabilities",
@@ -19412,7 +19412,7 @@
       "node_kind": "heading",
       "norm_label": "mvp capabilities",
       "source_file": "README.md",
-      "source_location": "L7"
+      "source_location": "L140"
     },
     {
       "id": "readme_mvp_smoke_test",
@@ -19424,7 +19424,7 @@
       "node_kind": "heading",
       "norm_label": "mvp smoke test",
       "source_file": "README.md",
-      "source_location": "L209"
+      "source_location": "L328"
     },
     {
       "id": "readme_postgresql_persistence_model",
@@ -19436,7 +19436,7 @@
       "node_kind": "heading",
       "norm_label": "postgresql persistence model",
       "source_file": "README.md",
-      "source_location": "L227"
+      "source_location": "L346"
     },
     {
       "id": "readme_requirements",
@@ -19448,7 +19448,7 @@
       "node_kind": "heading",
       "norm_label": "requirements",
       "source_file": "README.md",
-      "source_location": "L47"
+      "source_location": "L180"
     },
     {
       "id": "readme_tests",
@@ -19460,7 +19460,7 @@
       "node_kind": "heading",
       "norm_label": "tests",
       "source_file": "README.md",
-      "source_location": "L213"
+      "source_location": "L332"
     },
     {
       "id": "tests_unit_console_applicationtest",
@@ -66578,62 +66578,18 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L169",
+      "source_location": "L288",
       "weight": 1.0
     },
     {
       "source": "readme_flux",
-      "target": "readme_broker_api",
+      "target": "readme_mvp_capabilities",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L104",
-      "weight": 1.0
-    },
-    {
-      "source": "readme_flux",
-      "target": "readme_mvp_smoke_test",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "README.md",
-      "source_location": "L209",
-      "weight": 1.0
-    },
-    {
-      "source": "readme_flux",
-      "target": "readme_tests",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "README.md",
-      "source_location": "L213",
-      "weight": 1.0
-    },
-    {
-      "source": "readme_flux",
-      "target": "readme_postgresql_persistence_model",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "README.md",
-      "source_location": "L227",
-      "weight": 1.0
-    },
-    {
-      "source": "readme_flux",
-      "target": "readme_directory_structure",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "README.md",
-      "source_location": "L257",
+      "source_location": "L140",
       "weight": 1.0
     },
     {
@@ -66644,7 +66600,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L34",
+      "source_location": "L167",
       "weight": 1.0
     },
     {
@@ -66655,18 +66611,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L47",
-      "weight": 1.0
-    },
-    {
-      "source": "readme_flux",
-      "target": "readme_installation",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "README.md",
-      "source_location": "L54",
+      "source_location": "L180",
       "weight": 1.0
     },
     {
@@ -66677,12 +66622,67 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L68",
+      "source_location": "L187",
       "weight": 1.0
     },
     {
       "source": "readme_flux",
-      "target": "readme_mvp_capabilities",
+      "target": "readme_broker_api",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L223",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flux",
+      "target": "readme_mvp_smoke_test",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L328",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flux",
+      "target": "readme_tests",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L332",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flux",
+      "target": "readme_postgresql_persistence_model",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L346",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flux",
+      "target": "readme_directory_structure",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L376",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flux",
+      "target": "readme_install",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
@@ -84420,5 +84420,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "ae301ec8a6987d6fc037669ca3f18f0719f7b4bc"
+  "built_at_commit": "21296d6c108bc990f97a1a95ad0033630b992916"
 }

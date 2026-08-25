@@ -1,7 +1,7 @@
-# Graph Report - flux  (2026-08-24)
+# Graph Report - flux  (2026-08-25)
 
 ## Corpus Check
-- 165 files · ~65,949 words
+- 165 files · ~66,358 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -10,7 +10,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `ae301ec8`
+- Built from commit: `21296d6c`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -218,7 +218,7 @@ Nodes (3): PHPUnit\Framework\Attributes\DataProvider, TopicMatcher, TopicMatcher
 
 ### Community 54 - "Flux"
 Cohesion: 0.15
-Nodes (12): Broker API, CLI, Database Migrations, Directory Structure, Flux, Installation, Known Limitations, MVP Capabilities (+4 more)
+Nodes (12): Broker API, CLI, Database Migrations, Directory Structure, Flux, Install, Known Limitations, MVP Capabilities (+4 more)
 
 ### Community 57 - "RetryPolicy"
 Cohesion: 0.20

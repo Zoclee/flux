@@ -4,6 +4,139 @@ Flux is a pure PHP implementation of a unified message broker with PostgreSQL pe
 
 Flux is currently at an MVP release-candidate stopping point. The first supported protocol adapter is AMQP 0-9-1, backed by the protocol-neutral Broker core and PostgreSQL persistence.
 
+## Install
+
+These steps install Flux from source and run it as a `systemd` service on an Ubuntu server. Replace `v0.1.0` with the release tag you want to deploy.
+
+1. Install the required operating-system packages:
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates composer git postgresql php-cli php-pgsql unzip
+php -v
+php -m | grep -E 'openssl|PDO|pdo_pgsql'
+```
+
+Flux requires PHP 8.4 or newer. If your Ubuntu release does not provide PHP 8.4 packages, install PHP 8.4 from your preferred trusted package source before continuing.
+
+2. Create a dedicated system user and install Flux under `/opt/flux`:
+
+```bash
+sudo adduser --system --group --no-create-home --home /opt/flux flux
+sudo git clone https://github.com/Zoclee/flux.git /opt/flux
+cd /opt/flux
+sudo git checkout v0.1.0
+sudo chown -R flux:flux /opt/flux
+sudo -u flux composer install --no-dev --optimize-autoloader
+```
+
+3. Create the PostgreSQL role and database:
+
+```bash
+sudo -u postgres psql
+```
+
+```sql
+CREATE ROLE flux WITH LOGIN PASSWORD 'change-this-database-password';
+CREATE DATABASE flux OWNER flux;
+\q
+```
+
+4. Create Flux's environment file:
+
+```bash
+sudo install -o root -g flux -m 0640 /dev/null /etc/flux.env
+sudoedit /etc/flux.env
+```
+
+```text
+FLUX_DB_HOST=127.0.0.1
+FLUX_DB_PORT=5432
+FLUX_DB_NAME=flux
+FLUX_DB_USER=flux
+FLUX_DB_PASSWORD=change-this-database-password
+
+FLUX_AMQP_ENABLED=true
+FLUX_AMQP_HOST=0.0.0.0
+FLUX_AMQP_PORT=5672
+FLUX_AMQP_HEARTBEAT=60
+
+FLUX_DIAGNOSTICS_HOST=127.0.0.1
+FLUX_DIAGNOSTICS_PORT=5673
+```
+
+Keep the diagnostics listener bound to `127.0.0.1`; it is intended for local administrative CLI checks.
+
+5. Apply database migrations:
+
+```bash
+cd /opt/flux
+sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux db:status'
+sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux migrate'
+```
+
+6. Create an AMQP user, grant access to the default virtual host, and set permissions:
+
+```bash
+cd /opt/flux
+sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux user:create app'
+sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux user:grant-vhost app /'
+sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux user:set-permissions app / ".*" ".*" ".*"'
+```
+
+`user:create` prompts for the AMQP password. Store that password securely and use it in AMQP client connection strings.
+
+7. Install the `systemd` service:
+
+```bash
+sudo tee /etc/systemd/system/flux.service >/dev/null <<'EOF'
+[Unit]
+Description=Flux message broker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flux
+Group=flux
+WorkingDirectory=/opt/flux
+EnvironmentFile=/etc/flux.env
+ExecStart=/usr/bin/php /opt/flux/flux server:start
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/flux/var
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now flux
+```
+
+8. Verify the service:
+
+```bash
+systemctl status flux
+cd /opt/flux
+sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux health'
+sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux readiness'
+```
+
+Expected result: `health` reports `Runtime: healthy`, and `readiness` reports `Ready: yes`.
+
+AMQP clients can connect to:
+
+```text
+amqp://app:<password>@<server-host>:5672/
+```
+
 ## MVP Capabilities
 
 - PostgreSQL-backed persistence
@@ -40,7 +173,7 @@ Flux is currently at an MVP release-candidate stopping point. The first supporte
 - no mandatory returns or alternate exchanges
 - no management UI or HTTP health endpoints
 - no Prometheus/OpenTelemetry metrics subsystem
-- no systemd, Docker, or process-supervisor packaging
+- no packaged systemd unit, Docker image, or process-supervisor packaging
 - no mutual TLS or certificate-based user authentication
 - no rolling restart or zero-downtime upgrade workflow
 
@@ -50,20 +183,6 @@ Flux is currently at an MVP release-candidate stopping point. The first supporte
 - PHP extensions: `pdo`, `pdo_pgsql`, and `openssl`
 - Composer
 - PostgreSQL for integration tests and persistence work
-
-## Installation
-
-From a source checkout:
-
-```bash
-composer install
-```
-
-After the first public package is published, install the Composer binary with:
-
-```bash
-composer global require zoclee/flux
-```
 
 ## CLI
 
