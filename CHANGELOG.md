@@ -2,6 +2,12 @@
 
 All notable changes to Flux will be documented in this file.
 
+## [0.1.0] - 25 Aug 2026
+
+### Changed
+
+- Added Ubuntu service installation instructions to the README.
+
 ## [0.1.0-RC3] - 24 Aug 2026
 
 ### Changed
