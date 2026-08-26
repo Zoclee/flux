@@ -45,8 +45,8 @@ CREATE DATABASE flux OWNER flux;
 4. Create Flux's environment file:
 
 ```bash
-sudo install -o root -g flux -m 0640 /dev/null /etc/flux.env
-sudoedit /etc/flux.env
+sudo install -o root -g flux -m 0640 /dev/null /opt/flux/.env
+sudoedit /opt/flux/.env
 ```
 
 ```text
@@ -71,17 +71,17 @@ Keep the diagnostics listener bound to `127.0.0.1`; it is intended for local adm
 
 ```bash
 cd /opt/flux
-sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux db:status'
-sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux migrate'
+sudo -u flux php flux db:status
+sudo -u flux php flux migrate
 ```
 
 6. Create an AMQP user, grant access to the default virtual host, and set permissions:
 
 ```bash
 cd /opt/flux
-sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux user:create app'
-sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux user:grant-vhost app /'
-sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux user:set-permissions app / ".*" ".*" ".*"'
+sudo -u flux php flux user:create app
+sudo -u flux php flux user:grant-vhost app /
+sudo -u flux php flux user:set-permissions app / ".*" ".*" ".*"
 ```
 
 `user:create` prompts for the AMQP password. Store that password securely and use it in AMQP client connection strings.
@@ -100,7 +100,7 @@ Type=simple
 User=flux
 Group=flux
 WorkingDirectory=/opt/flux
-EnvironmentFile=/etc/flux.env
+EnvironmentFile=/opt/flux/.env
 ExecStart=/usr/bin/php /opt/flux/flux server:start
 Restart=on-failure
 RestartSec=5
@@ -125,8 +125,8 @@ sudo systemctl enable --now flux
 ```bash
 systemctl status flux
 cd /opt/flux
-sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux health'
-sudo -u flux sh -c 'set -a; . /etc/flux.env; set +a; php flux readiness'
+sudo -u flux php flux health
+sudo -u flux php flux readiness
 ```
 
 Expected result: `health` reports `Runtime: healthy`, and `readiness` reports `Ready: yes`.
@@ -387,4 +387,3 @@ Live consumers, TCP connections, channels, sockets, and runtime statistics are n
 - `src/Support/` - small shared infrastructure
 - `tests/` - unit, integration, and fixture files
 - `var/` - runtime logs and process files
-
