@@ -19,14 +19,15 @@ php -m | grep -E 'openssl|PDO|pdo_pgsql'
 
 Flux requires PHP 8.4 or newer. If your Ubuntu release does not provide PHP 8.4 packages, install PHP 8.4 from your preferred trusted package source before continuing.
 
-2. Create a dedicated system user and install Flux under `/opt/flux`:
+2. Create a dedicated system user and install Flux under `/opt/zoclee/flux`:
 
 ```bash
-sudo adduser --system --group --no-create-home --home /opt/flux flux
-sudo git clone https://github.com/Zoclee/flux.git /opt/flux
-cd /opt/flux
+sudo adduser --system --group --no-create-home --home /opt/zoclee/flux flux
+sudo mkdir -p /opt/zoclee
+sudo git clone https://github.com/Zoclee/flux.git /opt/zoclee/flux
+cd /opt/zoclee/flux
 sudo git checkout v0.1.0
-sudo chown -R flux:flux /opt/flux
+sudo chown -R flux:flux /opt/zoclee/flux
 sudo -u flux composer install --no-dev --optimize-autoloader
 ```
 
@@ -45,8 +46,8 @@ CREATE DATABASE flux OWNER flux;
 4. Create Flux's environment file:
 
 ```bash
-sudo install -o root -g flux -m 0640 /dev/null /opt/flux/.env
-sudoedit /opt/flux/.env
+sudo install -o root -g flux -m 0640 /dev/null /opt/zoclee/flux/.env
+sudoedit /opt/zoclee/flux/.env
 ```
 
 ```text
@@ -70,7 +71,7 @@ Keep the diagnostics listener bound to `127.0.0.1`; it is intended for local adm
 5. Apply database migrations:
 
 ```bash
-cd /opt/flux
+cd /opt/zoclee/flux
 sudo -u flux php flux db:status
 sudo -u flux php flux migrate
 ```
@@ -78,7 +79,7 @@ sudo -u flux php flux migrate
 6. Create an AMQP user, grant access to the default virtual host, and set permissions:
 
 ```bash
-cd /opt/flux
+cd /opt/zoclee/flux
 sudo -u flux php flux user:create app
 sudo -u flux php flux user:grant-vhost app /
 sudo -u flux php flux user:set-permissions app / ".*" ".*" ".*"
@@ -99,9 +100,9 @@ Wants=network-online.target
 Type=simple
 User=flux
 Group=flux
-WorkingDirectory=/opt/flux
-EnvironmentFile=/opt/flux/.env
-ExecStart=/usr/bin/php /opt/flux/flux server:start
+WorkingDirectory=/opt/zoclee/flux
+EnvironmentFile=/opt/zoclee/flux/.env
+ExecStart=/usr/bin/php /opt/zoclee/flux/flux server:start
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -110,7 +111,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/opt/flux/var
+ReadWritePaths=/opt/zoclee/flux/var
 
 [Install]
 WantedBy=multi-user.target
@@ -124,7 +125,7 @@ sudo systemctl enable --now flux
 
 ```bash
 systemctl status flux
-cd /opt/flux
+cd /opt/zoclee/flux
 sudo -u flux php flux health
 sudo -u flux php flux readiness
 ```
