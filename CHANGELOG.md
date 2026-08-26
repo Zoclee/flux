@@ -2,6 +2,13 @@
 
 All notable changes to Flux will be documented in this file.
 
+## [0.2.0] - Pending
+
+### Changed
+
+- Simplified CLI instructions by moving service .env file to installation folder.
+- Add vendor to installation path.
+
 ## [0.1.0] - 25 Aug 2026
 
 ### Changed
